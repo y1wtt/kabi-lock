@@ -413,8 +413,10 @@ fn wait_and_reap(shared: &Shared, pid: u32) -> Option<i32> {
             Err(Errno::EINTR) => continue,
             Err(e) => {
                 warn!("u2f: cannot wait for the helper: {e}");
-                // 回収できる状態に確実にするため、止めてから回収する
-                if let Some(child) = shared.lock().child.as_mut() {
+                // 回収できる状態に確実にするため、止めてから回収する（自分の子のままのときだけ）
+                if kill_before_reap(e)
+                    && let Some(child) = shared.lock().child.as_mut()
+                {
                     let _ = child.kill();
                 }
                 break;
@@ -425,6 +427,14 @@ fn wait_and_reap(shared: &Shared, pid: u32) -> Option<i32> {
     let status = state.child.take().and_then(|mut child| child.wait().ok());
     shared.changed.notify_all();
     status.and_then(|s| s.code())
+}
+
+/// `waitid` が失敗したとき、回収の前に子を SIGKILL してよいか。
+///
+/// `ECHILD` はもう回収済みか自分の子ではないという意味で、その pid は別のプロセスに
+/// 使われているかもしれない。そのときはシグナルを送らず、`Child` を手放すだけにする。
+fn kill_before_reap(error: Errno) -> bool {
+    error != Errno::ECHILD
 }
 
 /// pam_u2f の PAM サービスで、成功するまでタッチ待ちを繰り返す（helper を起動し直す）。
@@ -556,6 +566,13 @@ mod supervisor_tests {
         assert_eq!(next_step(HelperExit::Other(None), false), Next::Retry);
         assert_eq!(next_step(HelperExit::Accepted, true), Next::Stop);
         assert_eq!(next_step(HelperExit::Other(None), true), Next::Stop);
+    }
+
+    #[test]
+    fn kills_before_reaping_only_while_the_child_is_ours() {
+        // ECHILD: もう回収済みか自分の子ではない。pid は別のプロセスに使われているかもしれない
+        assert!(!kill_before_reap(Errno::ECHILD));
+        assert!(kill_before_reap(Errno::EINVAL));
     }
 
     #[test]
