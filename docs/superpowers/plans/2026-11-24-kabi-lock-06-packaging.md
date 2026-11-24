@@ -1150,5 +1150,11 @@ git tag -a v0.1.0 -m "kabi-lock 0.1.0"
   - `config::load()` のファイルの I/O（存在しない・読めない）。
 - `Machine`・`LaneAllocator`・`Loaded` に `Debug` を付ける。
 - `PasswordBuffer` の `bool` を返すメソッドに `#[must_use]` を付ける。
-- `lane_x` が負になりうることを doc コメントに書く。
 - `shackle_path` に doc コメントを書く。
+
+Plan 6（パッケージングと文書）で見つかったもの:
+
+- 設定例のテスト: 設定例（`docs/config.example.toml`）のキー一覧がテストの中に固定で書いてあるので、`Config` に新しいキーを足して設定例に書き忘れても、テストが気づかない。
+- `aarch64` は PKGBUILD の `arch` に入れたが、試していない。
+- `.SRCINFO` の仮の `pkgver`（`0.1.0.r0.g0000000`）は、`vercmp` では `r151.g…` より新しいと比べられる。AUR に push する前に、タグ `v0.1.0` を打つか、本物の `pkgver` を入れる。
+- Task 6 の Step 3〜5（`makepkg -s` と `namcap`、`pacman -U`、ネストした sway と実機でのロック解除）は、人間の作業として残っている。
