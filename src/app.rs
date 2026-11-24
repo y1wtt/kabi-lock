@@ -97,6 +97,47 @@ pub(crate) struct LockOutput {
     pub(crate) frame_pending: bool,
     /// wl_surface の buffer_scale。GPU で描くときだけ使う（shm は常に 1）。
     pub(crate) scale: i32,
+    /// GPU のフレームを 1 回でも出せたか。出せる前に失敗したら shm の黒に切り替える。
+    pub(crate) presented: bool,
+}
+
+impl LockOutput {
+    /// GPU のフレームを出せなかったときの後始末。
+    ///
+    /// まだ 1 枚も出していなければ、lock surface が map されず（キーボードのフォーカスも来ず）
+    /// パスワードを打てないので、shm の黒に切り替えて出す。出したことがあれば、次のフレームか
+    /// Tick で描き直す。
+    fn gpu_frame_failed(
+        &mut self,
+        shm: &Shm,
+        qh: &QueueHandle<App>,
+        requested_frame: bool,
+        error: String,
+    ) {
+        // この描画で要求したフレームコールバックは commit されていないので、待たない
+        if requested_frame {
+            self.frame_pending = false;
+        }
+        if self.presented {
+            log::warn!(
+                "GPU frame for {} failed, retrying later: {error}",
+                self.meta.label()
+            );
+            return;
+        }
+        log::warn!(
+            "GPU frame for {} failed before the first frame, using shm: {error}",
+            self.meta.label()
+        );
+        // 先に GpuSurface を捨てる（EGL サーフェス → wl_egl_window の順に壊れる）
+        self.render = None;
+        let wl_surface = self.lock_surface.wl_surface();
+        // 失敗した描画で buffer_scale が保留になっているかもしれない。shm は論理サイズ・スケール 1
+        wl_surface.set_buffer_scale(1);
+        let mut black = ShmBlack::new();
+        black.draw(shm, wl_surface, self.size.0, self.size.1, qh);
+        self.render = Some(OutputRender::Shm(black));
+    }
 }
 
 /// ロック中の状態。SCTK の各ハンドラはこの型に実装する。
@@ -316,7 +357,10 @@ impl App {
                 if surface.size() != (buffer_width, buffer_height) {
                     surface.resize(buffer_width, buffer_height);
                 }
-                surface.make_current(gpu);
+                if let Err(e) = surface.try_make_current(gpu) {
+                    out.gpu_frame_failed(&self.shm, &self.qh, false, e);
+                    return;
+                }
                 background.draw(
                     gpu,
                     &out.meta.name,
@@ -329,11 +373,15 @@ impl App {
                 let wl_surface = out.lock_surface.wl_surface();
                 // buffer_scale とフレームコールバックは、swap の commit で一緒に反映される
                 wl_surface.set_buffer_scale(scale);
-                if animating && !out.frame_pending {
+                let requested_frame = animating && !out.frame_pending;
+                if requested_frame {
                     wl_surface.frame(&self.qh, FrameCallbackData(wl_surface.clone()));
                     out.frame_pending = true;
                 }
-                surface.swap(gpu);
+                match surface.try_swap(gpu) {
+                    Ok(()) => out.presented = true,
+                    Err(e) => out.gpu_frame_failed(&self.shm, &self.qh, requested_frame, e),
+                }
             }
             None => {}
         }
@@ -424,6 +472,7 @@ impl App {
             render: None,
             frame_pending: false,
             scale: 1,
+            presented: false,
         });
     }
 
