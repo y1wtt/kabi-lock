@@ -174,7 +174,7 @@ U2F の成功は「入力待ち」「失敗」のどちらからでも解除中�
 
 ### PAM 設定ファイル
 
-- `/etc/pam.d/kabi-lock`（`auth include login`）はパッケージで入れる。
+- `/etc/pam.d/kabi-lock`（`auth include login` と `account include login`）はパッケージで入れる。kabi-lock は `pam_authenticate` の後に `pam_acct_mgmt` も呼ぶので、`account` の行がないと解除できない。
 - U2F 用はユーザーごとに `authfile` が違うので入れない。`contrib/pam.d/kabi-lock-u2f` に例を置く。
   既存の `u2f-touch` などを `auth.u2f.pam_service` で指定してもよい。
 
