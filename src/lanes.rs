@@ -4,14 +4,18 @@
 pub const GAP: u32 = 16;
 
 /// 帯に並ぶレーンの数。最低 1 本。
+///
+/// 設定に巨大な値が入っても桁あふれしないよう、足し算は `saturating_add` で行う。
 pub fn lane_count(band_width: u32, pillar_width: u32) -> usize {
-    (((band_width + GAP) / (pillar_width + GAP)) as usize).max(1)
+    ((band_width.saturating_add(GAP) / pillar_width.saturating_add(GAP)) as usize).max(1)
 }
 
 /// レーン左端の x。帯の左端を 0 とし、レーン全体を帯の中央に寄せる。
+///
+/// 帯が柱 1 本より狭いときは負になる（柱が帯からはみ出して中央に置かれる）。
 pub fn lane_x(lane: usize, band_width: u32, pillar_width: u32) -> f32 {
     let n = lane_count(band_width, pillar_width) as f32;
-    let pitch = (pillar_width + GAP) as f32;
+    let pitch = pillar_width as f32 + GAP as f32;
     let used = n * pitch - GAP as f32;
     (band_width as f32 - used) / 2.0 + lane as f32 * pitch
 }
@@ -160,6 +164,15 @@ mod tests {
         a.spawn(1);
         a.clear();
         assert!(a.pillars(2).is_empty());
+    }
+
+    #[test]
+    fn huge_widths_do_not_overflow() {
+        assert_eq!(lane_count(u32::MAX, 32), (u32::MAX / 48) as usize);
+        assert_eq!(lane_count(768, u32::MAX), 1);
+        assert_eq!(lane_count(u32::MAX, u32::MAX), 1);
+        assert!(lane_x(0, u32::MAX, 32).is_finite());
+        assert!(lane_x(0, 768, u32::MAX).is_finite());
     }
 
     #[test]
