@@ -472,6 +472,60 @@ mod tests {
         assert_eq!(config_path(None, None), None);
     }
 
+    /// 設定例の `docs/config.example.toml` が、実際のパーサーで警告なしに読めて、
+    /// 初期値と同じであり、設計書 7 章の全キーを載せていることを確かめる。
+    #[test]
+    fn example_config_matches_defaults_and_lists_every_key() {
+        let text = include_str!("../docs/config.example.toml");
+        let loaded = parse(text).expect("example config must parse");
+        assert!(
+            loaded.unknown_keys.is_empty(),
+            "unknown keys in example: {:?}",
+            loaded.unknown_keys
+        );
+        assert_eq!(loaded.config, Config::default());
+
+        // 省略しても初期値になるので、キーが消えても上の比較では気づけない。
+        // 例にすべてのキーが書かれているかを、TOML の葉のキーで確かめる。
+        fn leaf_keys(prefix: &str, value: &toml::Value, out: &mut Vec<String>) {
+            match value {
+                toml::Value::Table(table) => {
+                    for (key, child) in table {
+                        let path = if prefix.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{prefix}.{key}")
+                        };
+                        leaf_keys(&path, child, out);
+                    }
+                }
+                _ => out.push(prefix.to_string()),
+            }
+        }
+        let value: toml::Value = toml::from_str(text).unwrap();
+        let mut keys = Vec::new();
+        leaf_keys("", &value, &mut keys);
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "appearance.blur",
+                "appearance.date_format",
+                "appearance.fade_in_ms",
+                "appearance.font",
+                "auth.pam_service",
+                "auth.u2f.enabled",
+                "auth.u2f.pam_service",
+                "display.primary",
+                "input.band_width",
+                "input.pillar_fade_ms",
+                "input.pillar_width",
+                "keepassxc.lock_before",
+                "keepassxc.unlock_after",
+            ]
+        );
+    }
+
     fn outputs() -> Vec<OutputInfo> {
         vec![
             OutputInfo {
