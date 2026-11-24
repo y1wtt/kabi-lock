@@ -42,7 +42,7 @@ use crate::render::background::{self, Background};
 use crate::render::egl::{Gpu, GpuSurface};
 use crate::render::overlay::OverlayHost;
 use crate::render::{OutputRender, shm::ShmBlack};
-use crate::state::{Action, Event, Machine};
+use crate::state::{Action, Event, Machine, Phase};
 use crate::wl::outputs::OutputMeta;
 
 /// `Event::Tick` を送る間隔。画面が消えていてフレームコールバックが来なくても状態を進めるため。
@@ -312,6 +312,8 @@ pub fn run(config: Config) -> Result<(), AppError> {
             // 眠っている出力はコールバック待ちのままなので、ここでは描かない。コンポジタが
             // 溜めていたコールバックを届けたときに、frame() が settled を見て最終の絵を描く
             app.kick_animation();
+            // 時刻・日付・状態・主画面が変わったら重ね物を描き直す（Plan 4）
+            app.tick_overlay();
             TimeoutAction::ToDuration(TICK)
         })
         .map_err(|e| AppError::Other(format!("tick timer: {}", e.error)))?;
@@ -456,6 +458,20 @@ impl App {
             && !self.outputs[index].frame_pending
         {
             self.draw_output(index);
+        }
+    }
+
+    /// 主画面の重ね物が前に描いたときから変わっていれば描き直す（`Tick` ごと。Plan 4）。
+    ///
+    /// 分が変わった・失敗の錠が消えた・主画面の出力が抜かれた、などを拾う。ロックを外した後は描かない。
+    fn tick_overlay(&mut self) {
+        // release_lock の後・ロックが終わった後は描かない（kick_animation と同じ）
+        if self.exit.is_some() || self.machine.phase() == Phase::Done {
+            return;
+        }
+        self.primary_index();
+        if self.overlay.wants_frame(&self.machine, self.clock.now_ms()) {
+            self.redraw_primary();
         }
     }
 
