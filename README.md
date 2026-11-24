@@ -27,6 +27,10 @@ YubiKey.
 - If the GPU cannot be used, it still locks with a plain black screen.
 - TOML configuration. Every setting is optional.
 
+![Light pillars while typing, then the padlock shaking on a wrong password](docs/images/typing-and-failure.gif)
+
+*Typing raises light pillars; a wrong password makes the padlock shake.*
+
 ## Requirements
 
 - A Wayland compositor with `ext-session-lock-v1`. Developed and tested on sway
