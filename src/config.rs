@@ -175,6 +175,51 @@ pub fn load() -> Config {
     }
 }
 
+/// 主画面を選ぶための出力の情報。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputInfo {
+    /// 出力名（例: `DP-10`）。
+    pub name: String,
+    /// wl_output の description。sway では `make model serial (出力名)`。
+    pub description: String,
+}
+
+impl OutputInfo {
+    /// description から末尾の ` (出力名)` を外したもの。なければそのまま。
+    fn description_without_name(&self) -> &str {
+        let suffix = format!(" ({})", self.name);
+        self.description
+            .strip_suffix(suffix.as_str())
+            .unwrap_or(&self.description)
+    }
+
+    fn matches(&self, rule: &str) -> bool {
+        self.name == rule || self.description == rule || self.description_without_name() == rule
+    }
+}
+
+/// 時計などを出す出力を選ぶ（`outputs` の添字）。
+///
+/// `rules` を上から順に照合し、最初に一致した出力。一致しなければ `focused`（出力名）、
+/// それもなければ最初の出力。出力がなければ `None`。
+pub fn select_primary(
+    rules: &[String],
+    outputs: &[OutputInfo],
+    focused: Option<&str>,
+) -> Option<usize> {
+    for rule in rules {
+        if let Some(i) = outputs.iter().position(|o| o.matches(rule)) {
+            return Some(i);
+        }
+    }
+    if let Some(name) = focused
+        && let Some(i) = outputs.iter().position(|o| o.name == name)
+    {
+        return Some(i);
+    }
+    if outputs.is_empty() { None } else { Some(0) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +327,74 @@ mod tests {
     #[test]
     fn config_path_needs_some_base() {
         assert_eq!(config_path(None, None), None);
+    }
+
+    fn outputs() -> Vec<OutputInfo> {
+        vec![
+            OutputInfo {
+                name: "eDP-1".into(),
+                description: "Lenovo Group Limited 0x403A (eDP-1)".into(),
+            },
+            OutputInfo {
+                name: "DP-8".into(),
+                description: "LG Electronics LG FULL HD 0x01010101 (DP-8)".into(),
+            },
+            OutputInfo {
+                name: "DP-10".into(),
+                description: "LG Electronics LG ULTRAWIDE 311NTDV3Z418 (DP-10)".into(),
+            },
+        ]
+    }
+
+    fn rules(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn selects_by_output_name() {
+        assert_eq!(
+            select_primary(&rules(&["DP-10"]), &outputs(), None),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn selects_by_description_without_name_suffix() {
+        let r = rules(&["LG Electronics LG ULTRAWIDE 311NTDV3Z418"]);
+        assert_eq!(select_primary(&r, &outputs(), None), Some(2));
+    }
+
+    #[test]
+    fn selects_by_full_description() {
+        let r = rules(&["LG Electronics LG FULL HD 0x01010101 (DP-8)"]);
+        assert_eq!(select_primary(&r, &outputs(), None), Some(1));
+    }
+
+    #[test]
+    fn earlier_rule_wins() {
+        let r = rules(&["HDMI-A-1", "DP-8", "DP-10"]);
+        assert_eq!(select_primary(&r, &outputs(), None), Some(1));
+    }
+
+    #[test]
+    fn partial_name_does_not_match() {
+        let r = rules(&["DP-1"]);
+        assert_eq!(select_primary(&r, &outputs(), Some("DP-8")), Some(1));
+    }
+
+    #[test]
+    fn falls_back_to_focused_output() {
+        assert_eq!(select_primary(&[], &outputs(), Some("DP-10")), Some(2));
+    }
+
+    #[test]
+    fn falls_back_to_first_output() {
+        assert_eq!(select_primary(&[], &outputs(), None), Some(0));
+        assert_eq!(select_primary(&[], &outputs(), Some("gone")), Some(0));
+    }
+
+    #[test]
+    fn no_outputs_means_none() {
+        assert_eq!(select_primary(&rules(&["DP-10"]), &[], Some("DP-10")), None);
     }
 }
