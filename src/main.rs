@@ -74,9 +74,14 @@ fn main() -> ExitCode {
             env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
                 .init();
             let config = kabi_lock::config::load();
+            // 解除後に KeePassXC の解除を頼むか（Plan 5）。config は run に move されるので先に読む
+            let unlock_keepassxc = config.keepassxc.unlock_after;
             let result = app::run(config);
-            if let Err(e) = &result {
-                eprintln!("kabi-lock: {e}");
+            match &result {
+                Err(e) => eprintln!("kabi-lock: {e}"),
+                // ここではロックはもう外れていて、U2F の helper も止まっている
+                Ok(()) if unlock_keepassxc => kabi_lock::auth::keepassxc::unlock_after(),
+                Ok(()) => log::info!("keepassxc: unlock_after is disabled in config"),
             }
             ExitCode::from(exit_code(&result))
         }
