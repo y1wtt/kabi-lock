@@ -236,6 +236,8 @@ pub fn run(config: Config) -> Result<(), AppError> {
     handle
         .insert_source(Timer::from_duration(TICK), |_, _, app: &mut App| {
             app.handle_event(Event::Tick);
+            // 描き直しの連鎖が止まっている出力があれば再開する（解除の開始・画面の復帰）
+            app.kick_animation();
             TimeoutAction::ToDuration(TICK)
         })
         .map_err(|e| AppError::Other(format!("tick timer: {}", e.error)))?;
@@ -512,7 +514,11 @@ impl App {
             log::debug!("unlock is waiting for the locked event");
             return;
         }
-        lock.unlock();
+        // Phase::Done なので reveal = 1.0。元の画面と同じくっきりしたフレームを出してから外す
+        self.draw_all_outputs();
+        if let Some(lock) = &self.lock {
+            lock.unlock();
+        }
         // unlock_and_destroy をコンポジタに届けてから終わる
         if let Err(e) = self.conn.roundtrip() {
             log::warn!("roundtrip after unlock failed: {e}");
