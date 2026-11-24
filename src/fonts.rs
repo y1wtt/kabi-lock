@@ -143,6 +143,12 @@ fn parse_weight(text: &str) -> Option<FcWeight> {
     text.parse().ok().map(FcWeight::Fixed)
 }
 
+/// fontconfig の index から、ファイルの中のフェイスの番号（egui の `FontData::index`、skrifa の
+/// `FontRef::from_index` に渡す値）を取り出す。上位 16 bit の名前付きインスタンスの番号は捨てる。
+pub fn face_number(fc_index: u32) -> u32 {
+    fc_index & 0xFFFF
+}
+
 /// fontconfig の weight を CSS / OpenType の weight にする（fontconfig の `FcWeightToOpenType` と同じ表）。
 pub fn css_weight(fc: f32) -> f32 {
     const MAP: [(f32, f32); 12] = [
@@ -249,7 +255,7 @@ fn pick_one(faces: &[&FcFace], desired: f32) -> Option<FacePick> {
     let variable_weight = (kind_rank(best) > 0).then_some(weight);
     Some(FacePick {
         file: best.file.clone(),
-        face_index: best.index & 0xFFFF,
+        face_index: face_number(best.index),
         weight,
         variable_weight,
     })
@@ -489,6 +495,15 @@ mod tests {
             "/v.ttf\t0\tV\t80\t0\tTrueType\t[62 100]\n/w.ttf\t0\tW\t80\t0\tTrueType\t[50 87]\n";
         let widths: Vec<f32> = parse_fc_list(text).iter().map(|f| f.width).collect();
         assert_eq!(widths, [100.0, 87.0]);
+    }
+
+    #[test]
+    fn face_number_drops_the_named_instance() {
+        assert_eq!(face_number(0), 0);
+        assert_eq!(face_number(3), 3);
+        // 可変の CJK フォントの名前付きインスタンス（例: fc-match が返す 0x50000）
+        assert_eq!(face_number(5 << 16), 0);
+        assert_eq!(face_number((5 << 16) | 2), 2);
     }
 
     #[test]
