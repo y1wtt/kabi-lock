@@ -5,8 +5,9 @@
 #
 # Every key is optional. The values below are the defaults, so a file that
 # contains exactly this text behaves the same as no file at all.
-# A missing, unreadable or invalid file is not fatal: kabi-lock logs a warning
-# and uses the defaults. Unknown keys are ignored with a warning.
+# A missing file silently gives the defaults; an unreadable or invalid file
+# logs a warning and gives the defaults (the whole file is ignored, not just
+# the bad key). Unknown keys are ignored with a warning.
 
 [display]
 # Which monitor shows the clock, date, input bar and padlock. The other
@@ -35,15 +36,20 @@ fade_in_ms = 1500
 # 0.5 to 50 are clamped; a negative or NaN value becomes 7.
 blur = 7.0
 # Date format under the clock, as a chrono (strftime-style) string.
-# Month and weekday names follow the LC_TIME locale, for example "%a %m/%d".
+# Month and weekday names follow the locale from LC_ALL, then LC_TIME, then
+# LANG (the first one that is set and not empty), for example "%a %m/%d".
+# A C/POSIX or unknown locale gives English names.
 # An invalid format falls back to "%m/%d".
 date_format = "%m/%d"
 # Font family for the clock and date: a fontconfig family name (see
-# `fc-list : family`). Within that family the clock uses the weight nearest to
-# 500 (Medium) and the date the weight nearest to 400 (Regular). If the family
-# is not found, its files cannot be read, or fontconfig (`fc-list`) is not
-# available, the Inter font built into kabi-lock is used. Which font was
-# chosen (and why the fallback was used) is written to the log.
+# `fc-list : family`). Within that family the clock wants weight 500 (Medium)
+# and the date weight 400 (Regular); if the family lacks that weight, the
+# closest weight is used, chosen with the same rules as CSS font matching.
+# If the family is not found, has no usable upright TrueType/OpenType face,
+# its files cannot be read, fontconfig (`fc-list`) is not available, or
+# fontconfig does not answer within about a second, the Inter font built into
+# kabi-lock is used. Which font was chosen (and why the fallback was used) is
+# written to the log.
 font = "Inter"
 
 [input]
@@ -66,26 +72,36 @@ band_width = 768
 pam_service = "kabi-lock"
 
 [auth.u2f]
-# Also accept a YubiKey touch while locked. Needs a PAM service for it
-# (see contrib/pam.d/kabi-lock-u2f), which must contain pam_u2f only. If the
-# service file exists neither in /etc/pam.d nor in /usr/lib/pam.d, the touch
-# check is not started (a warning is logged) and only the password works.
-# Set to false to turn this off.
-#
-# The U2F PAM service must not prompt for anything (password, PIN, "press
-# ENTER"). kabi-lock refuses to answer any prompt, and if the service asks one
-# it gives up on security-key unlock for that lock (to avoid piling up failed
-# tries); you then have to unlock with your password.
+# Also accept a YubiKey touch while locked. Needs a PAM service for it (see
+# pam_service below). If the service file exists neither in /etc/pam.d nor in
+# /usr/lib/pam.d, the touch check is not started (a warning is logged) and
+# only the password works. Set to false to turn this off.
 enabled = true
-# PAM service for the touch check. You may name one you already have,
-# for example "u2f-touch".
+# PAM service for the touch check. An example service is installed by the
+# package as /usr/share/kabi-lock/pam.d/kabi-lock-u2f (copy it to /etc/pam.d/
+# and fix its authfile); it is also contrib/pam.d/kabi-lock-u2f in the
+# kabi-lock repository. You may instead name a service you already have, for
+# example "u2f-touch".
+# Whichever you use, it must contain pam_u2f only and must not prompt for
+# anything (password, PIN, "press ENTER"). kabi-lock refuses to answer any
+# prompt, and if the service asks one it gives up on security-key unlock for
+# that lock (to avoid piling up failed tries); you then have to unlock with
+# your password.
 pam_service = "kabi-lock-u2f"
 
 [keepassxc]
 # Ask KeePassXC to lock all databases before the screen locks (D-Bus
 # org.keepassxc.KeePassXC.MainWindow.lockAllDatabases). Does nothing if
 # KeePassXC is not running. Locking continues even if it fails.
+# kabi-lock then checks for up to 2 seconds that the databases really locked;
+# if one is still unlocked (for example because of unsaved changes or an open
+# dialog), it sends a critical desktop notification. This check works only
+# when KeePassXC itself provides Secret Service; if another program such as
+# gnome-keyring serves org.freedesktop.secrets, the lock request is still
+# sent but cannot be verified.
 lock_before = true
 # After unlocking, ask KeePassXC (Secret Service) to unlock the databases
-# that are locked, which makes its unlock dialog appear.
+# that are locked, which makes its unlock dialog appear. This also works only
+# when KeePassXC itself provides Secret Service; with gnome-keyring serving
+# org.freedesktop.secrets it does nothing.
 unlock_after = true
