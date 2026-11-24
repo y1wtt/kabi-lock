@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_dispatch2, delegate_registry,
     output::{OutputHandler, OutputState},
     reexports::{
@@ -38,8 +38,8 @@ use crate::clock::Clock;
 use crate::config::Config;
 use crate::input::{self, KeyAction};
 use crate::password::PasswordBuffer;
-use crate::render::background::Background;
-use crate::render::egl::Gpu;
+use crate::render::background::{self, Background};
+use crate::render::egl::{Gpu, GpuSurface};
 use crate::render::{OutputRender, shm::ShmBlack};
 use crate::state::{Action, Event, Machine};
 use crate::wl::outputs::OutputMeta;
@@ -278,6 +278,15 @@ pub fn run(config: Config) -> Result<(), AppError> {
 impl App {
     /// 描画の入口。出力 `index` の今の状態を描いて commit する。
     pub(crate) fn draw_output(&mut self, index: usize) {
+        let now = self.clock.now_ms();
+        let fade = background::fade_for(
+            self.first_configure_ms,
+            now,
+            self.config.appearance.fade_in_ms,
+        );
+        let phase = self.machine.phase();
+        let reveal = background::reveal_for(phase, now);
+        let animating = background::needs_frames(fade, phase);
         let Some(out) = self.outputs.get_mut(index) else {
             return;
         };
@@ -285,7 +294,6 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
-        // Plan 3 が Gpu の分岐を足すので、if let ではなく match にしておく
         match out.render.as_mut() {
             Some(OutputRender::Shm(black)) => {
                 black.draw(
@@ -296,8 +304,100 @@ impl App {
                     &self.qh,
                 );
             }
-            Some(OutputRender::Gpu(_)) => {}
+            Some(OutputRender::Gpu(surface)) => {
+                let (Some(gpu), Some(background)) = (self.gpu.as_ref(), self.background.as_ref())
+                else {
+                    return;
+                };
+                let scale = out.scale.max(1);
+                let (buffer_width, buffer_height) = (width * scale as u32, height * scale as u32);
+                if surface.size() != (buffer_width, buffer_height) {
+                    surface.resize(buffer_width, buffer_height);
+                }
+                surface.make_current(gpu);
+                background.draw(
+                    gpu,
+                    &out.meta.name,
+                    buffer_width,
+                    buffer_height,
+                    fade,
+                    reveal,
+                );
+                // Plan 4: ここで主画面に重ね物を描く
+                let wl_surface = out.lock_surface.wl_surface();
+                // buffer_scale とフレームコールバックは、swap の commit で一緒に反映される
+                wl_surface.set_buffer_scale(scale);
+                if animating && !out.frame_pending {
+                    wl_surface.frame(&self.qh, FrameCallbackData(wl_surface.clone()));
+                    out.frame_pending = true;
+                }
+                surface.swap(gpu);
+            }
             None => {}
+        }
+    }
+
+    /// wl_surface から出力の番号を引く。
+    fn output_index_of(&self, surface: &wl_surface::WlSurface) -> Option<usize> {
+        self.outputs
+            .iter()
+            .position(|o| o.lock_surface.wl_surface() == surface)
+    }
+
+    /// GPU が使えて、まだ描画手段がなければ EGL サーフェスを作る。
+    /// 失敗したら何もしない（呼び出し側が shm の黒を作る）。
+    fn try_gpu_render(&mut self, index: usize) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let out = &mut self.outputs[index];
+        if out.render.is_some() {
+            return;
+        }
+        let scale = out.scale.max(1) as u32;
+        let (width, height) = (out.size.0 * scale, out.size.1 * scale);
+        match GpuSurface::new(gpu, out.lock_surface.wl_surface(), width, height) {
+            Ok(surface) => {
+                log::debug!("GPU surface for {}: {width}x{height}", out.meta.label());
+                out.render = Some(OutputRender::Gpu(surface));
+            }
+            Err(e) => log::warn!(
+                "GPU surface for {} failed, using shm: {e}",
+                out.meta.label()
+            ),
+        }
+    }
+
+    /// 背景がまだ動いているか（フェード中・解除中）。GPU がなければ動かない。
+    fn background_animating(&self) -> bool {
+        if self.gpu.is_none() {
+            return false;
+        }
+        let fade = background::fade_for(
+            self.first_configure_ms,
+            self.clock.now_ms(),
+            self.config.appearance.fade_in_ms,
+        );
+        background::needs_frames(fade, self.machine.phase())
+    }
+
+    /// アニメーション中なのに、フレームコールバック待ちでない GPU の出力を描き直す。
+    fn kick_animation(&mut self) {
+        if !self.background_animating() {
+            return;
+        }
+        for index in 0..self.outputs.len() {
+            let out = &self.outputs[index];
+            if !out.frame_pending && matches!(out.render, Some(OutputRender::Gpu(_))) {
+                self.draw_output(index);
+            }
+        }
+    }
+
+    /// 全出力を 1 回ずつ描く。
+    fn draw_all_outputs(&mut self) {
+        for index in 0..self.outputs.len() {
+            self.draw_output(index);
         }
     }
 
