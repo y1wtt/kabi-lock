@@ -282,8 +282,7 @@ mod tests {
 
     #[test]
     fn shake_amplitude_decays() {
-        let peaks = [0.12, 0.28, 0.44, 0.60, 0.76, 0.88]
-            .map(|t| shake_offset(t * SHAKE_MS).abs());
+        let peaks = [0.12, 0.28, 0.44, 0.60, 0.76, 0.88].map(|t| shake_offset(t * SHAKE_MS).abs());
         for w in peaks.windows(2) {
             assert!(w[0] > w[1]);
         }
@@ -293,7 +292,10 @@ mod tests {
     fn reveal_runs_after_the_shackle_opens() {
         assert_eq!(reveal_progress(0.0), 0.0);
         assert_eq!(reveal_progress(REVEAL_START_MS), 0.0);
-        assert!(close(reveal_progress(REVEAL_START_MS + REVEAL_MS / 2.0), 0.5));
+        assert!(close(
+            reveal_progress(REVEAL_START_MS + REVEAL_MS / 2.0),
+            0.5
+        ));
         assert_eq!(reveal_progress(REVEAL_START_MS + REVEAL_MS), 1.0);
         assert!(REVEAL_START_MS >= SHACKLE_MS);
     }
