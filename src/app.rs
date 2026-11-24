@@ -606,7 +606,12 @@ impl App {
         match action {
             KeyAction::Submit => {
                 let empty = self.password.is_empty();
+                let before = self.machine.phase();
                 self.handle_event(Event::Submit { empty });
+                if before != Phase::Verifying && self.machine.phase() == Phase::Verifying {
+                    // Enter より前の柱を消す（失敗から入力待ちに戻ったときに再び描かれないように。Plan 4）
+                    self.overlay.submitted();
+                }
                 // 確認中になったらすぐ錠を出す（Plan 4）
                 self.redraw_primary();
             }
