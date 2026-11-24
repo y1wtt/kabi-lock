@@ -1,0 +1,91 @@
+# kabi-lock configuration.
+#
+# Copy this file to $XDG_CONFIG_HOME/kabi-lock/config.toml
+# (usually ~/.config/kabi-lock/config.toml).
+#
+# Every key is optional. The values below are the defaults, so a file that
+# contains exactly this text behaves the same as no file at all.
+# A missing, unreadable or invalid file is not fatal: kabi-lock logs a warning
+# and uses the defaults. Unknown keys are ignored with a warning.
+
+[display]
+# Which monitor shows the clock, date, input bar and padlock. The other
+# monitors show only the blurred background.
+#
+# Candidates are checked from the top; the first one that matches a connected
+# output wins. Each candidate is compared for exact equality with either
+#   - the output name, e.g. "DP-10"  (see `swaymsg -t get_outputs`)
+#   - the monitor description (wl_output description). sway writes it as
+#     "make model serial (DP-10)", so the text without the trailing
+#     " (DP-10)" is compared as well,
+#     e.g. "LG Electronics LG ULTRAWIDE 311NTDV3Z418".
+# If nothing matches, the output that was focused when the lock started (read
+# from the sway IPC) is used, and if that is unknown, the first output.
+#
+# Example: primary = ["DP-10", "LG Electronics LG ULTRAWIDE 311NTDV3Z418"]
+primary = []
+
+[appearance]
+# Time to fade from black to the blurred screenshot, in milliseconds.
+# The clock and the other overlays fade in together.
+fade_in_ms = 1500
+# Blur strength of the background: the radius, in screenshot pixels, of a
+# 5-pass box blur (the same look as swaylock-effects' --effect-blur 7x5, which
+# is about a 9.7 px Gaussian sigma). Larger is blurrier. Values outside
+# 0.5 to 50 are clamped; a negative or NaN value becomes 7.
+blur = 7.0
+# Date format under the clock, as a chrono (strftime-style) string.
+# Month and weekday names follow the LC_TIME locale, for example "%a %m/%d".
+# An invalid format falls back to "%m/%d".
+date_format = "%m/%d"
+# Font family for the clock and date: a fontconfig family name (see
+# `fc-list : family`). Within that family the clock uses the weight nearest to
+# 500 (Medium) and the date the weight nearest to 400 (Regular). If the family
+# is not found, its files cannot be read, or fontconfig (`fc-list`) is not
+# available, the Inter font built into kabi-lock is used. Which font was
+# chosen (and why the fallback was used) is written to the log.
+font = "Inter"
+
+[input]
+# How long one light pillar (drawn for each key press) takes to fade out, in ms.
+# Values above 10000 are clamped to 10000.
+pillar_fade_ms = 900
+# Width of a pillar in pixels, on a 1920x1080 layout (scaled with the screen
+# height on other sizes). Pillars are 16 px apart. Values above 1920 are
+# clamped to 1920.
+pillar_width = 32
+# Width of the input bar that holds the pillars, in pixels (1920x1080 layout).
+# Values above 1920 are clamped to 1920. The number of lanes is
+# (band_width + 16) / (pillar_width + 16), rounded down, and at least 1.
+# With the defaults that is 16 lanes.
+band_width = 768
+
+[auth]
+# PAM service that checks the typed password. The package installs
+# /etc/pam.d/kabi-lock.
+pam_service = "kabi-lock"
+
+[auth.u2f]
+# Also accept a YubiKey touch while locked. Needs a PAM service for it
+# (see contrib/pam.d/kabi-lock-u2f), which must contain pam_u2f only. If the
+# service file exists neither in /etc/pam.d nor in /usr/lib/pam.d, the touch
+# check is not started (a warning is logged) and only the password works.
+# Set to false to turn this off.
+#
+# The U2F PAM service must not prompt for anything (password, PIN, "press
+# ENTER"). kabi-lock refuses to answer any prompt, and if the service asks one
+# it gives up on security-key unlock for that lock (to avoid piling up failed
+# tries); you then have to unlock with your password.
+enabled = true
+# PAM service for the touch check. You may name one you already have,
+# for example "u2f-touch".
+pam_service = "kabi-lock-u2f"
+
+[keepassxc]
+# Ask KeePassXC to lock all databases before the screen locks (D-Bus
+# org.keepassxc.KeePassXC.MainWindow.lockAllDatabases). Does nothing if
+# KeePassXC is not running. Locking continues even if it fails.
+lock_before = true
+# After unlocking, ask KeePassXC (Secret Service) to unlock the databases
+# that are locked, which makes its unlock dialog appear.
+unlock_after = true
