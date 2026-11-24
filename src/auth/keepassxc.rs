@@ -7,6 +7,9 @@
 //!
 //! KeePassXC が起動していなければ何もしない。`org.freedesktop.secrets` は D-Bus の自動起動の
 //! 対象になっていることがあるので、名前の持ち主を先に確かめ、いないときは呼ばない。
+//! 確かめた後の呼び出しは、よく知られた名前ではなく持ち主の一意名（`:1.23` など）に送る。
+//! 確かめてから呼ぶまでの間に名前が手放されても、自動起動や別の持ち主（gnome-keyring など）に
+//! 届かないようにするため。
 //! D-Bus の呼び出しと、テストできる判断（純粋な関数）を分けて書く。
 
 #![forbid(unsafe_code)]
@@ -74,12 +77,18 @@ type NotifyArgs<'a> = (
 
 // ---- 純粋な判断 -------------------------------------------------------------
 
-/// Secret Service を KeePassXC 自身が提供しているか（2 つの名前の持ち主が同じ接続か）。
+/// Secret Service を KeePassXC 自身が提供していれば（2 つの名前の持ち主が同じ接続なら）、その一意名。
 ///
 /// 別のもの（gnome-keyring など）が提供しているときは、KeePassXC の DB の状態は分からないので
-/// 確認も解除要求もしない。
-fn keepassxc_serves_secrets(keepassxc_owner: Option<&str>, secrets_owner: Option<&str>) -> bool {
-    matches!((keepassxc_owner, secrets_owner), (Some(a), Some(b)) if a == b)
+/// `None` にして、確認も解除要求もしない。
+fn secrets_owner<'a>(
+    keepassxc_owner: Option<&'a str>,
+    secrets_owner: Option<&str>,
+) -> Option<&'a str> {
+    match (keepassxc_owner, secrets_owner) {
+        (Some(a), Some(b)) if a == b => Some(a),
+        _ => None,
+    }
 }
 
 /// ロックされていないコレクションのパス。
@@ -173,10 +182,10 @@ fn parse_bool(value: OwnedValue) -> Option<bool> {
 }
 
 /// `lockAllDatabases` の呼び出し。返事は求めない（未保存の DB があると KeePassXC が確認ダイアログを
-/// 出し、返事が遅れることがあるため）。
-fn lock_all_message() -> zbus::Result<Message> {
+/// 出し、返事が遅れることがあるため）。`owner` は KeePassXC の一意名。
+fn lock_all_message(owner: &str) -> zbus::Result<Message> {
     Message::method_call(KEEPASSXC_PATH, "lockAllDatabases")?
-        .destination(KEEPASSXC_NAME)?
+        .destination(owner)?
         .interface(KEEPASSXC_IFACE)?
         .with_flags(Flags::NoReplyExpected)?
         .build(&())
@@ -204,30 +213,30 @@ fn name_owner(conn: &Connection, name: &str) -> Option<String> {
     reply.body().deserialize::<String>().ok()
 }
 
-/// KeePassXC の D-Bus 名の持ち主と、Secret Service も KeePassXC が提供しているかどうか。
+/// KeePassXC の D-Bus 名の持ち主（一意名）と、Secret Service も KeePassXC が提供していれば、その一意名。
 struct Owners {
     keepassxc: Option<String>,
-    serves_secrets: bool,
+    secrets: Option<String>,
 }
 
 fn owners(conn: &Connection) -> Owners {
     let keepassxc = name_owner(conn, KEEPASSXC_NAME);
-    let secrets = name_owner(conn, SECRETS_NAME);
-    let serves_secrets = keepassxc_serves_secrets(keepassxc.as_deref(), secrets.as_deref());
-    Owners {
-        keepassxc,
-        serves_secrets,
-    }
+    let secrets_name_owner = name_owner(conn, SECRETS_NAME);
+    let secrets =
+        secrets_owner(keepassxc.as_deref(), secrets_name_owner.as_deref()).map(str::to_owned);
+    Owners { keepassxc, secrets }
 }
 
+/// Secret Service（一意名 `owner`）のプロパティを読む。
 fn get_secret_property(
     conn: &Connection,
+    owner: &str,
     path: &str,
     iface: &str,
     name: &str,
 ) -> zbus::Result<OwnedValue> {
     let reply = conn.call_method(
-        Some(SECRETS_NAME),
+        Some(owner),
         path,
         Some(PROPERTIES_IFACE),
         "Get",
@@ -236,14 +245,14 @@ fn get_secret_property(
     reply.body().deserialize::<OwnedValue>()
 }
 
-/// Secret Service の全コレクションと、それぞれの `Locked`。読めないコレクションは飛ばす。
-fn collections(conn: &Connection) -> zbus::Result<Vec<Collection>> {
-    let value = get_secret_property(conn, SECRETS_PATH, SERVICE_IFACE, "Collections")?;
+/// Secret Service（一意名 `owner`）の全コレクションと、それぞれの `Locked`。読めないコレクションは飛ばす。
+fn collections(conn: &Connection, owner: &str) -> zbus::Result<Vec<Collection>> {
+    let value = get_secret_property(conn, owner, SECRETS_PATH, SERVICE_IFACE, "Collections")?;
     let paths = parse_paths(value)
         .ok_or_else(|| zbus::Error::Failure("Collections is not an object path array".into()))?;
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
-        match get_secret_property(conn, &path, COLLECTION_IFACE, "Locked").map(parse_bool) {
+        match get_secret_property(conn, owner, &path, COLLECTION_IFACE, "Locked").map(parse_bool) {
             Ok(Some(locked)) => out.push(Collection { path, locked }),
             Ok(None) => debug!("keepassxc: {path}: Locked is not a boolean; skipped"),
             Err(e) => debug!("keepassxc: {path}: could not read Locked ({e}); skipped"),
@@ -283,18 +292,18 @@ pub fn lock_before_in_background() {
 fn lock_and_watch() -> zbus::Result<()> {
     let conn = connect()?;
     let owners = owners(&conn);
-    if owners.keepassxc.is_none() {
+    let Some(keepassxc) = owners.keepassxc else {
         info!("keepassxc: not running; nothing to lock");
         return Ok(());
-    }
-    conn.send(&lock_all_message()?)?;
+    };
+    conn.send(&lock_all_message(&keepassxc)?)?;
     info!("keepassxc: asked to lock all databases");
-    if !owners.serves_secrets {
+    let Some(secrets) = owners.secrets else {
         info!("keepassxc: Secret Service is not provided by KeePassXC; cannot verify the lock");
         return Ok(());
-    }
+    };
     let open = wait_until_locked(
-        || match collections(&conn) {
+        || match collections(&conn, &secrets) {
             Ok(c) => Some(c),
             Err(e) => {
                 warn!("keepassxc: could not read collections: {e}");
@@ -325,11 +334,11 @@ pub fn unlock_after() {
 
 fn request_unlock() -> zbus::Result<()> {
     let conn = connect()?;
-    if !owners(&conn).serves_secrets {
+    let Some(secrets) = owners(&conn).secrets else {
         info!("keepassxc: not serving Secret Service; nothing to unlock");
         return Ok(());
-    }
-    let locked = locked_paths(&collections(&conn)?);
+    };
+    let locked = locked_paths(&collections(&conn, &secrets)?);
     if locked.is_empty() {
         info!("keepassxc: no locked collections; nothing to unlock");
         return Ok(());
@@ -339,7 +348,7 @@ fn request_unlock() -> zbus::Result<()> {
         .map(|p| ObjectPath::try_from(p.as_str()))
         .collect::<Result<Vec<_>, _>>()?;
     let reply = conn.call_method(
-        Some(SECRETS_NAME),
+        Some(secrets.as_str()),
         SECRETS_PATH,
         Some(SERVICE_IFACE),
         "Unlock",
@@ -354,7 +363,7 @@ fn request_unlock() -> zbus::Result<()> {
         None => info!("keepassxc: collections unlocked without a prompt"),
         Some(path) => {
             conn.call_method(
-                Some(SECRETS_NAME),
+                Some(secrets.as_str()),
                 path,
                 Some(PROMPT_IFACE),
                 "Prompt",
@@ -384,15 +393,15 @@ mod tests {
 
     #[test]
     fn same_owner_serves_secrets() {
-        assert!(keepassxc_serves_secrets(Some(":1.10"), Some(":1.10")));
+        assert_eq!(secrets_owner(Some(":1.10"), Some(":1.10")), Some(":1.10"));
     }
 
     #[test]
     fn other_owner_does_not_serve_secrets() {
-        assert!(!keepassxc_serves_secrets(Some(":1.10"), Some(":1.11")));
-        assert!(!keepassxc_serves_secrets(Some(":1.10"), None));
-        assert!(!keepassxc_serves_secrets(None, Some(":1.11")));
-        assert!(!keepassxc_serves_secrets(None, None));
+        assert_eq!(secrets_owner(Some(":1.10"), Some(":1.11")), None);
+        assert_eq!(secrets_owner(Some(":1.10"), None), None);
+        assert_eq!(secrets_owner(None, Some(":1.11")), None);
+        assert_eq!(secrets_owner(None, None), None);
     }
 
     #[test]
@@ -502,7 +511,7 @@ mod tests {
 
     #[test]
     fn lock_all_does_not_wait_for_a_reply() {
-        let msg = lock_all_message().unwrap();
+        let msg = lock_all_message(":1.10").unwrap();
         let header = msg.header();
         assert!(
             msg.primary_header()
@@ -512,7 +521,8 @@ mod tests {
         assert_eq!(header.member().unwrap().as_str(), "lockAllDatabases");
         assert_eq!(header.path().unwrap().as_str(), KEEPASSXC_PATH);
         assert_eq!(header.interface().unwrap().as_str(), KEEPASSXC_IFACE);
-        assert_eq!(header.destination().unwrap().to_string(), KEEPASSXC_NAME);
+        // 確かめた一意名に送る（よく知られた名前だと、その間に持ち主が変わると自動起動しうる）
+        assert_eq!(header.destination().unwrap().to_string(), ":1.10");
     }
 
     #[test]
