@@ -12,5 +12,6 @@ fastrand = "2.5.0"
 log = "0.4.35"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_ignored = "0.1.14"
+smithay-client-toolkit = "0.21.1"
 toml = "1.2.2"
 zeroize = "1.9.2"
