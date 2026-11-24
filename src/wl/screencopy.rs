@@ -5,7 +5,64 @@
 //! （出力の transform と、フレームの Y_INVERT をここで戻す）。
 #![forbid(unsafe_code)]
 
-use wayland_client::protocol::{wl_output, wl_shm};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use log::{debug, warn};
+use smithay_client_toolkit::reexports::calloop::EventLoop;
+use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
+use smithay_client_toolkit::registry::SimpleGlobal;
+use smithay_client_toolkit::shm::raw::RawPool;
+use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_shm};
+use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+};
+
+/// 撮影全体の締め切り。過ぎたら撮れた分だけ返す（ロックを遅らせないため）。
+const CAPTURE_TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// 1 出力分のスクリーンショット。
+///
+/// `pixels` の 1 行目が画面の上。1 画素 4 バイトで、並びは `format` のとおり
+/// （`Xrgb8888` / `Argb8888` ならメモリ上は B, G, R, X）。`stride` は 1 行のバイト数。
+/// `width` / `height` はバッファの画素数（スケール 2 の出力なら論理サイズの 2 倍）。
+pub struct Screenshot {
+    pub output_name: String,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub format: wl_shm::Format,
+    pub pixels: Vec<u8>,
+}
+
+/// 別スレッドで新しい Wayland 接続を開き、全出力を撮る。出力ごとに失敗しうる。
+///
+/// 失敗した出力は結果に入らない（呼び出し側はその出力の背景を黒にする）。
+pub fn spawn_capture_all() -> JoinHandle<Vec<Screenshot>> {
+    std::thread::Builder::new()
+        .name("kabi-capture".into())
+        .spawn(|| {
+            let started = Instant::now();
+            match capture_all() {
+                Ok(shots) => {
+                    debug!(
+                        "captured {} screenshot(s) in {:?}",
+                        shots.len(),
+                        started.elapsed()
+                    );
+                    shots
+                }
+                Err(e) => {
+                    warn!("screenshots unavailable, background will be black: {e}");
+                    Vec::new()
+                }
+            }
+        })
+        .expect("failed to spawn the screenshot thread")
+}
 
 /// 32 ビット / 画素で、背景の描画側（`render::background`）が扱える形式か。
 pub(crate) fn is_supported(format: wl_shm::Format) -> bool {
@@ -89,6 +146,263 @@ pub(crate) fn normalize(
     }
     (lw as u32, lh as u32, (lw * 4) as u32, out)
 }
+
+// ---- ここから Wayland の処理（撮影スレッドの中だけで使う） ----
+
+struct OutputSlot {
+    output: wl_output::WlOutput,
+    name: Option<String>,
+    transform: wl_output::Transform,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameState {
+    Waiting,
+    Ready,
+    Failed,
+}
+
+struct FrameSlot {
+    output: usize,
+    frame: ZwlrScreencopyFrameV1,
+    /// (format, width, height, stride)
+    info: Option<(wl_shm::Format, u32, u32, u32)>,
+    pool: Option<RawPool>,
+    buffer: Option<wl_buffer::WlBuffer>,
+    y_invert: bool,
+    state: FrameState,
+}
+
+struct Capture {
+    shm: SimpleGlobal<wl_shm::WlShm, 1>,
+    outputs: Vec<OutputSlot>,
+    frames: Vec<FrameSlot>,
+}
+
+fn capture_all() -> Result<Vec<Screenshot>, String> {
+    let conn = Connection::connect_to_env().map_err(|e| format!("connect: {e}"))?;
+    let (globals, mut queue) =
+        registry_queue_init::<Capture>(&conn).map_err(|e| format!("registry: {e}"))?;
+    let qh = queue.handle();
+    // バージョン 3 の linux_dmabuf / buffer_done は使わないので 2 までにする
+    let manager: ZwlrScreencopyManagerV1 = globals
+        .bind(&qh, 1..=2, ())
+        .map_err(|e| format!("zwlr_screencopy_manager_v1: {e}"))?;
+    let shm: wl_shm::WlShm = globals
+        .bind(&qh, 1..=1, ())
+        .map_err(|e| format!("wl_shm: {e}"))?;
+
+    // 出力の名前（wl_output v4 の name）と transform を集める
+    let output_globals: Vec<(u32, u32)> = globals.contents().with_list(|list| {
+        list.iter()
+            .filter(|g| g.interface == "wl_output")
+            .map(|g| (g.name, g.version))
+            .collect()
+    });
+    let mut state = Capture {
+        shm: SimpleGlobal::from_bound(shm),
+        outputs: Vec::new(),
+        frames: Vec::new(),
+    };
+    for (index, (name, version)) in output_globals.into_iter().enumerate() {
+        let output: wl_output::WlOutput = globals.registry().bind(name, version.min(4), &qh, index);
+        state.outputs.push(OutputSlot {
+            output,
+            name: None,
+            transform: wl_output::Transform::Normal,
+        });
+    }
+    queue
+        .roundtrip(&mut state)
+        .map_err(|e| format!("roundtrip: {e}"))?;
+
+    for index in 0..state.outputs.len() {
+        if state.outputs[index].name.is_none() {
+            warn!("an output has no name (wl_output < v4), skipping its screenshot");
+            continue;
+        }
+        let frame =
+            manager.capture_output(0, &state.outputs[index].output, &qh, state.frames.len());
+        state.frames.push(FrameSlot {
+            output: index,
+            frame,
+            info: None,
+            pool: None,
+            buffer: None,
+            y_invert: false,
+            state: FrameState::Waiting,
+        });
+    }
+
+    // 締め切りつきでイベントを回す（コンポジターが返事をしなくても止まらない）
+    let mut event_loop: EventLoop<Capture> =
+        EventLoop::try_new().map_err(|e| format!("event loop: {e}"))?;
+    WaylandSource::new(conn.clone(), queue)
+        .insert(event_loop.handle())
+        .map_err(|e| format!("wayland source: {e}"))?;
+    let deadline = Instant::now() + CAPTURE_TIMEOUT;
+    while state.frames.iter().any(|f| f.state == FrameState::Waiting) {
+        let now = Instant::now();
+        if now >= deadline {
+            warn!("screenshot timed out, missing outputs will be black");
+            break;
+        }
+        event_loop
+            .dispatch(deadline - now, &mut state)
+            .map_err(|e| format!("dispatch: {e}"))?;
+    }
+
+    let mut shots = Vec::new();
+    for slot in &mut state.frames {
+        let output = &state.outputs[slot.output];
+        let name = output.name.clone().unwrap_or_default();
+        if let (FrameState::Ready, Some((format, width, height, stride)), Some(pool)) =
+            (slot.state, slot.info, slot.pool.as_mut())
+        {
+            let len = stride as usize * height as usize;
+            let (width, height, stride, pixels) = normalize(
+                &pool.mmap()[..len],
+                width,
+                height,
+                stride,
+                output.transform,
+                slot.y_invert,
+            );
+            debug!("screenshot of {name}: {width}x{height} {format:?}");
+            shots.push(Screenshot {
+                output_name: name,
+                width,
+                height,
+                stride,
+                format,
+                pixels,
+            });
+        } else if slot.state == FrameState::Failed {
+            warn!("screenshot of {name} failed, its background will be black");
+        }
+        if let Some(buffer) = slot.buffer.take() {
+            buffer.destroy();
+        }
+        slot.frame.destroy();
+    }
+    manager.destroy();
+    let _ = conn.flush();
+    Ok(shots)
+}
+
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Capture {
+    fn event(
+        _: &mut Self,
+        _: &wl_registry::WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // 撮影中の出力の増減は扱わない
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, usize> for Capture {
+    fn event(
+        state: &mut Self,
+        _: &wl_output::WlOutput,
+        event: wl_output::Event,
+        index: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let slot = &mut state.outputs[*index];
+        match event {
+            wl_output::Event::Name { name } => slot.name = Some(name),
+            wl_output::Event::Geometry {
+                transform: WEnum::Value(t),
+                ..
+            } => slot.transform = t,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwlrScreencopyFrameV1, usize> for Capture {
+    fn event(
+        state: &mut Self,
+        frame: &ZwlrScreencopyFrameV1,
+        event: zwlr_screencopy_frame_v1::Event,
+        index: &usize,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        let output_name = state.outputs[state.frames[*index].output]
+            .name
+            .clone()
+            .unwrap_or_default();
+        let slot = &mut state.frames[*index];
+        match event {
+            zwlr_screencopy_frame_v1::Event::Buffer {
+                format,
+                width,
+                height,
+                stride,
+            } => {
+                if slot.buffer.is_some() {
+                    return;
+                }
+                let format = match format {
+                    WEnum::Value(f) if is_supported(f) => f,
+                    other => {
+                        warn!(
+                            "screenshot of {output_name}: unsupported format {other:?}, using black"
+                        );
+                        slot.state = FrameState::Failed;
+                        return;
+                    }
+                };
+                if width == 0 || height == 0 || stride < width * 4 {
+                    warn!(
+                        "screenshot of {output_name}: bad buffer {width}x{height} stride {stride}"
+                    );
+                    slot.state = FrameState::Failed;
+                    return;
+                }
+                let len = stride as usize * height as usize;
+                let mut pool = match RawPool::new(len, &state.shm) {
+                    Ok(pool) => pool,
+                    Err(e) => {
+                        warn!("screenshot of {output_name}: shm pool: {e}");
+                        slot.state = FrameState::Failed;
+                        return;
+                    }
+                };
+                let buffer = pool.create_buffer(
+                    0,
+                    width as i32,
+                    height as i32,
+                    stride as i32,
+                    format,
+                    (),
+                    qh,
+                );
+                frame.copy(&buffer);
+                slot.info = Some((format, width, height, stride));
+                slot.pool = Some(pool);
+                slot.buffer = Some(buffer);
+            }
+            zwlr_screencopy_frame_v1::Event::Flags {
+                flags: WEnum::Value(flags),
+            } => {
+                slot.y_invert = flags.contains(zwlr_screencopy_frame_v1::Flags::YInvert);
+            }
+            zwlr_screencopy_frame_v1::Event::Ready { .. } => slot.state = FrameState::Ready,
+            zwlr_screencopy_frame_v1::Event::Failed => slot.state = FrameState::Failed,
+            _ => {}
+        }
+    }
+}
+
+wayland_client::delegate_noop!(Capture: ZwlrScreencopyManagerV1);
+wayland_client::delegate_noop!(Capture: ignore wl_shm::WlShm);
+wayland_client::delegate_noop!(Capture: ignore wl_buffer::WlBuffer);
 
 #[cfg(test)]
 mod tests {
@@ -205,5 +519,21 @@ mod tests {
         assert!(is_supported(wl_shm::Format::Xbgr2101010));
         assert!(!is_supported(wl_shm::Format::Rgb565));
         assert!(!is_supported(wl_shm::Format::Rgb888));
+    }
+
+    /// 今のセッションの全出力を撮る（ロックはしない）。`cargo test -- --ignored` で手動実行。
+    #[test]
+    #[ignore = "needs a running wlroots compositor"]
+    fn captures_the_current_session() {
+        let shots = spawn_capture_all().join().expect("thread");
+        assert!(!shots.is_empty());
+        for s in &shots {
+            assert!(!s.output_name.is_empty());
+            assert!(s.pixels.len() >= (s.stride * (s.height - 1) + s.width * 4) as usize);
+            eprintln!(
+                "{}: {}x{} stride {} {:?}",
+                s.output_name, s.width, s.height, s.stride, s.format
+            );
+        }
     }
 }
