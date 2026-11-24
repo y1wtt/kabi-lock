@@ -45,6 +45,45 @@ pub fn pillar_at(elapsed_ms: f32, life_ms: f32) -> Option<PillarFrame> {
 pub const SHACKLE_MS: f32 = 800.0;
 /// 跳ね上がりの長さ。
 const LIFT_MS: f32 = 260.0;
+
+/// 解除（錠が開く → ぼかしが晴れる）の時間配分。設定の `appearance.unlock_open_ms` と
+/// `appearance.unlock_reveal_ms` から作る。
+///
+/// 跳ね上がりと、開いてからぼかしが晴れ始めるまでの間は `open_ms` に比例させ、
+/// 初期値（800 / 700）のときの形を保つ。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnlockTiming {
+    /// 錠が開き切るまで（跳ね上がり + 回転）。
+    pub open_ms: f32,
+    /// ぼかしが晴れ切るまで（重ね物が消えるのも同じ長さ）。
+    pub reveal_ms: f32,
+}
+
+impl Default for UnlockTiming {
+    fn default() -> Self {
+        Self {
+            open_ms: 800.0,
+            reveal_ms: 700.0,
+        }
+    }
+}
+
+impl UnlockTiming {
+    /// 跳ね上がりの長さ。初期値では 260ms（`open_ms` の 260/800）。
+    pub fn lift_ms(&self) -> f32 {
+        self.open_ms * 260.0 / 800.0
+    }
+
+    /// 解除開始から、ぼかしが晴れ始めるまで。初期値では 900ms（`open_ms` の 900/800）。
+    pub fn reveal_start_ms(&self) -> f32 {
+        self.open_ms * 900.0 / 800.0
+    }
+
+    /// 解除開始からロックを外すまで。ぼかしが晴れ切る前に外さないよう切り上げる。
+    pub fn total_ms(&self) -> u64 {
+        (self.reveal_start_ms() + self.reveal_ms).ceil() as u64
+    }
+}
 /// アイコン座標（64x56）での、長い足（回転軸）の x。
 pub const LONG_LEG_X: f32 = 42.0;
 /// 閉じているときの短い足の x。
@@ -68,6 +107,14 @@ pub const SHACKLE_STROKE: f32 = 3.5;
 pub struct ShackleGeom {
     pub lift_y: f32,
     pub short_leg_x: f32,
+}
+
+impl ShackleGeom {
+    /// 閉じた錠の U 字（確認中・失敗中に出す形）。
+    pub const CLOSED: ShackleGeom = ShackleGeom {
+        lift_y: 0.0,
+        short_leg_x: SHORT_LEG_X_CLOSED,
+    };
 }
 
 /// 解除開始からの経過時間での U 字の状態。
@@ -313,6 +360,60 @@ mod tests {
         ));
         assert_eq!(reveal_progress(REVEAL_START_MS + REVEAL_MS), 1.0);
         const { assert!(REVEAL_START_MS >= SHACKLE_MS) };
+    }
+
+    #[test]
+    fn default_unlock_timing_keeps_the_design() {
+        let t = UnlockTiming::default();
+        assert_eq!(t.open_ms, 800.0);
+        assert_eq!(t.reveal_ms, 700.0);
+        assert_eq!(t.lift_ms(), 260.0);
+        assert_eq!(t.reveal_start_ms(), 900.0);
+        assert_eq!(t.total_ms(), 1600);
+    }
+
+    #[test]
+    fn unlock_timing_scales_with_the_open_time() {
+        let t = UnlockTiming {
+            open_ms: 400.0,
+            reveal_ms: 300.0,
+        };
+        assert_eq!(t.lift_ms(), 130.0);
+        assert_eq!(t.reveal_start_ms(), 450.0);
+        assert_eq!(t.total_ms(), 750);
+    }
+
+    #[test]
+    fn unlock_total_rounds_up_so_the_reveal_can_finish() {
+        let t = UnlockTiming {
+            open_ms: 333.0,
+            reveal_ms: 100.0,
+        };
+        // 333 × 9/8 = 374.625 → 474.625 を切り上げ
+        assert_eq!(t.total_ms(), 475);
+    }
+
+    #[test]
+    fn zero_unlock_timing_has_zero_total() {
+        let t = UnlockTiming {
+            open_ms: 0.0,
+            reveal_ms: 0.0,
+        };
+        assert_eq!(t.lift_ms(), 0.0);
+        assert_eq!(t.reveal_start_ms(), 0.0);
+        assert_eq!(t.total_ms(), 0);
+    }
+
+    #[test]
+    fn closed_geometry_is_the_resting_shackle() {
+        assert_eq!(
+            ShackleGeom::CLOSED,
+            ShackleGeom {
+                lift_y: 0.0,
+                short_leg_x: SHORT_LEG_X_CLOSED,
+            }
+        );
+        assert_eq!(shackle_at(0.0), ShackleGeom::CLOSED);
     }
 
     #[test]
