@@ -101,6 +101,32 @@ mod tests {
     }
 
     #[test]
+    fn text_with_an_embedded_control_character_is_ignored() {
+        assert_eq!(
+            classify(Keysym::a, Some("a\u{1}"), false),
+            KeyAction::Ignore
+        );
+        assert_eq!(
+            classify(Keysym::a, Some("\u{7f}a"), false),
+            KeyAction::Ignore
+        );
+    }
+
+    #[test]
+    fn multi_character_text_is_inserted() {
+        // コンポーズキーや IME は 1 回の押下で複数文字を返すことがある
+        assert_eq!(
+            classify(Keysym::eacute, Some("é"), false),
+            KeyAction::Insert
+        );
+        assert_eq!(classify(Keysym::a, Some("ab"), false), KeyAction::Insert);
+        assert_eq!(
+            classify(Keysym::a, Some("e\u{301}"), false),
+            KeyAction::Insert
+        );
+    }
+
+    #[test]
     fn keys_without_text_are_ignored() {
         assert_eq!(classify(Keysym::Shift_L, None, false), KeyAction::Ignore);
         assert_eq!(classify(Keysym::a, Some(""), false), KeyAction::Ignore);
