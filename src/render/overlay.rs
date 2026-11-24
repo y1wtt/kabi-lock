@@ -313,13 +313,15 @@ fn fallback_font() -> Option<FontData> {
             return None;
         }
     };
+    // 可変フォントの名前付きインスタンス（例: 0x50000）は上位 16 bit を捨ててフェイスの番号にする
+    let face = fonts::face_number(index);
     // egui は読めないフォントで panic するので、同じ方法（skrifa）で先に確かめる
-    if let Err(e) = skrifa::FontRef::from_index(&bytes, index) {
+    if let Err(e) = skrifa::FontRef::from_index(&bytes, face) {
         log::warn!("fallback font {file} (index {index}) is not usable: {e}");
         return None;
     }
-    log::debug!("fallback font for {pattern}: {file} (index {index})");
-    Some(FontData::from_blob(Arc::new(bytes), index))
+    log::debug!("fallback font for {pattern}: {file} (index {index}, face {face})");
+    Some(FontData::from_blob(Arc::new(bytes), face))
 }
 
 /// 1 フレーム分の図形を積む。描く順は 光の柱 → 時計 → 日付 → 錠（U 字 → 本体）。
