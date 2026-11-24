@@ -602,6 +602,8 @@ mod tests {
                 "appearance.date_format",
                 "appearance.fade_in_ms",
                 "appearance.font",
+                "appearance.unlock_open_ms",
+                "appearance.unlock_reveal_ms",
                 "auth.pam_service",
                 "auth.u2f.enabled",
                 "auth.u2f.pam_service",

@@ -51,6 +51,19 @@ date_format = "%m/%d"
 # kabi-lock is used. Which font was chosen (and why the fallback was used) is
 # written to the log.
 font = "Inter"
+# Unlock animation, in milliseconds. After a correct password or YubiKey
+# touch the padlock opens, then the blur clears and the clock and other
+# overlays fade out, then the lock is released.
+# Time for the padlock to open (lift and swivel). The short pause between the
+# padlock opening and the blur starting to clear scales with it: the blur
+# starts clearing at unlock_open_ms * 9/8 (900 ms with the default).
+# 0 opens the padlock at once. Values above 5000 are clamped to 5000.
+unlock_open_ms = 800
+# Time for the blur to clear and the overlays to fade out. The lock is
+# released when this ends, unlock_open_ms * 9/8 + unlock_reveal_ms after the
+# unlock started (1600 ms with the defaults). 0 clears the blur at once.
+# Values above 5000 are clamped to 5000.
+unlock_reveal_ms = 700
 
 [input]
 # How long one light pillar (drawn for each key press) takes to fade out, in ms.
