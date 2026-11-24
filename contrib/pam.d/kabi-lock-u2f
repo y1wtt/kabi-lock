@@ -1,0 +1,35 @@
+#%PAM-1.0
+# Example PAM service for kabi-lock's YubiKey (FIDO U2F) unlock.
+#
+# This file is NOT installed by the package: the authfile path differs per
+# user and per setup. Copy it to /etc/pam.d/kabi-lock-u2f (as root) and fix
+# the authfile, or point `auth.u2f.pam_service` in config.toml at a service
+# you already have.
+#
+# WARNING: keep this service to pam_u2f ONLY.
+# While the screen is locked, kabi-lock calls pam_authenticate on this service
+# again and again (once a second after each failure) until a key is touched.
+# Do not add pam_faillock, pam_unix or any other module that asks for a
+# password, and do not `include` another stack (such as system-auth or login):
+# every failed try would be counted, the failures pile up every second, and
+# your account can end up locked.
+#
+# Never add `nouserok` to the pam_u2f line. With a missing authfile (or a user
+# with no entry) pam_u2f would then succeed without a key touch, and anyone
+# could unlock the screen.
+#
+# Do not enable `pinverification` or `interactive`, and do not include a
+# password stack. If this service ever prompts for input (password, PIN,
+# "press ENTER"), kabi-lock refuses to answer, gives up on security-key unlock
+# for that lock (the process exits with status 3 instead of retrying, to avoid
+# faillock) and you have to unlock with your password.
+#
+# Touching a registered key unlocks the screen with no password and no PIN,
+# so PIN-protected keys (pinverification=1) cannot be used here.
+#
+# authfile: one of
+#   /etc/u2f_mappings                    system-wide, one "user:keyhandle,..." line per user
+#   /home/YOUR_USER/.config/Yubico/u2f_keys   per user (the pam_u2f default if authfile is omitted)
+# Register a key with pamu2fcfg (package pam-u2f), see pamu2fcfg(1).
+auth       required     pam_u2f.so    authfile=/etc/u2f_mappings
+account    required     pam_permit.so
