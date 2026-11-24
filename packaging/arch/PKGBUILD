@@ -63,6 +63,7 @@ package() {
 	install -Dm644 assets/fonts/LICENSE.txt "$pkgdir/usr/share/licenses/$pkgname/LICENSE-Inter-OFL.txt"
 
 	install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
+	install -Dm644 README.ja.md "$pkgdir/usr/share/doc/$_pkgname/README.ja.md"
 	install -Dm644 docs/images/lock-unlock.gif \
 		"$pkgdir/usr/share/doc/$_pkgname/docs/images/lock-unlock.gif"
 	install -Dm644 docs/images/typing-and-failure.gif \
