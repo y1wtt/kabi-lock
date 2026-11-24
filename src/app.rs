@@ -468,10 +468,12 @@ impl App {
     }
 
     /// 主画面を描き直す。フレームコールバック待ちなら、そのコールバックで描かれるので何もしない。
+    /// 重ね物は GPU でしか描かないので、主画面が shm の黒なら描き直さない（同じ黒を commit し続けない）。
     pub(crate) fn redraw_primary(&mut self) {
         if let Some(index) = self.primary_index(None)
-            && index < self.outputs.len()
-            && !self.outputs[index].frame_pending
+            && let Some(out) = self.outputs.get(index)
+            && !out.frame_pending
+            && matches!(out.render, Some(OutputRender::Gpu(_)))
         {
             self.draw_output(index);
         }
