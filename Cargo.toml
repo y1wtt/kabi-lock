@@ -1,0 +1,16 @@
+[package]
+name = "kabi-lock"
+version = "0.1.0"
+edition = "2024"
+description = "A screen locker for sway (ext-session-lock) with a blurred, fading lock screen"
+license = "BSD-3-Clause"
+repository = "https://github.com/y1wtt/kabi-lock"
+
+[dependencies]
+env_logger = "0.11.12"
+fastrand = "2.5.0"
+log = "0.4.35"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_ignored = "0.1.14"
+toml = "1.2.2"
+zeroize = "1.9.2"
