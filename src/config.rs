@@ -202,12 +202,13 @@ impl OutputInfo {
 ///
 /// `rules` を上から順に照合し、最初に一致した出力。一致しなければ `focused`（出力名）、
 /// それもなければ最初の出力。出力がなければ `None`。
+/// 空（空白だけを含む）のルールは無視する（description が空の出力に一致してしまうため）。
 pub fn select_primary(
     rules: &[String],
     outputs: &[OutputInfo],
     focused: Option<&str>,
 ) -> Option<usize> {
-    for rule in rules {
+    for rule in rules.iter().filter(|r| !r.trim().is_empty()) {
         if let Some(i) = outputs.iter().position(|o| o.matches(rule)) {
             return Some(i);
         }
@@ -391,6 +392,16 @@ mod tests {
     fn falls_back_to_first_output() {
         assert_eq!(select_primary(&[], &outputs(), None), Some(0));
         assert_eq!(select_primary(&[], &outputs(), Some("gone")), Some(0));
+    }
+
+    #[test]
+    fn empty_rules_are_ignored() {
+        let mut outs = outputs();
+        outs[1].description = String::new();
+        // 空のルールが description の空な出力（DP-8）に一致してはいけない
+        assert_eq!(select_primary(&rules(&[""]), &outs, None), Some(0));
+        assert_eq!(select_primary(&rules(&["  "]), &outs, None), Some(0));
+        assert_eq!(select_primary(&rules(&["", "DP-10"]), &outs, None), Some(2));
     }
 
     #[test]
