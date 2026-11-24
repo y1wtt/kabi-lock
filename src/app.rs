@@ -359,18 +359,34 @@ pub fn run(config: Config) -> Result<(), AppError> {
 
 impl App {
     /// 主画面の添字（出力の一覧が変わっていれば選び直す）。Plan 4。
-    pub(crate) fn primary_index(&mut self) -> Option<usize> {
-        self.overlay.refresh_primary(
+    ///
+    /// 選び直して主画面が別の出力に替わったら、前の主画面に残っている重ね物を消すため、
+    /// その出力がまだあれば重ね物なしで描き直す。添字は出力が抜かれるとずれるので出力名で探す。
+    /// `drawing` はこれから描く出力（そこで描かれるので、ここでは描かない）。
+    /// フレームコールバック待ちなら、前の主画面は描き終えていない（settled でない）ので、
+    /// そのコールバックで描き直される。
+    pub(crate) fn primary_index(&mut self, drawing: Option<usize>) -> Option<usize> {
+        let primary = self.overlay.refresh_primary(
             self.outputs
                 .iter()
                 .map(|o| (o.meta.name.as_str(), o.meta.description.as_str())),
-        )
+        );
+        if let Some(name) = self.overlay.take_previous_primary()
+            && let Some(index) = self.outputs.iter().position(|o| o.meta.name == name)
+            && Some(index) != drawing
+            && !self.outputs[index].frame_pending
+        {
+            // 一覧は今選び直したばかりなので、draw_output の中では選び直さない（ここに戻ってこない）
+            self.draw_output(index);
+        }
+        primary
     }
 
     /// 描画の入口。出力 `index` の今の状態を描いて commit する。
     pub(crate) fn draw_output(&mut self, index: usize) {
-        // 出力の一覧が変わっていれば主画面を選び直す（Plan 4）
-        self.primary_index();
+        // 出力の一覧が変わっていれば主画面を選び直す（Plan 4）。
+        // 描くたびにここで選び直すことがあり、主画面が替わったら前の主画面もここで描き直す（primary_index）
+        self.primary_index(Some(index));
         let now = self.clock.now_ms();
         let fade = background::fade_for(
             self.first_configure_ms,
@@ -453,7 +469,7 @@ impl App {
 
     /// 主画面を描き直す。フレームコールバック待ちなら、そのコールバックで描かれるので何もしない。
     pub(crate) fn redraw_primary(&mut self) {
-        if let Some(index) = self.primary_index()
+        if let Some(index) = self.primary_index(None)
             && index < self.outputs.len()
             && !self.outputs[index].frame_pending
         {
@@ -469,7 +485,7 @@ impl App {
         if self.exit.is_some() || self.machine.phase() == Phase::Done {
             return;
         }
-        self.primary_index();
+        self.primary_index(None);
         if self.overlay.wants_frame(&self.machine, self.clock.now_ms()) {
             self.redraw_primary();
         }
