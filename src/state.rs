@@ -19,6 +19,20 @@ pub enum Phase {
     Done,
 }
 
+impl Phase {
+    /// この状態に入ってからの経過ミリ秒。開始時刻を持つ `Failed` と `Unlocking` だけ `Some`。
+    ///
+    /// `anim` の関数に渡すため `f32` で返す。`now_ms` が開始より前でも 0 にとどめる。
+    pub fn elapsed_ms(&self, now_ms: u64) -> Option<f32> {
+        match *self {
+            Phase::Failed { since_ms } | Phase::Unlocking { since_ms } => {
+                Some(now_ms.saturating_sub(since_ms) as f32)
+            }
+            Phase::Idle | Phase::Verifying | Phase::Done => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     /// Enter が押された。`empty` はパスワードバッファが空かどうか。
@@ -220,6 +234,27 @@ mod tests {
         m.handle(Event::U2fSucceeded, 50);
         m.handle(Event::U2fSucceeded, 400);
         assert_eq!(m.phase(), Phase::Unlocking { since_ms: 50 });
+    }
+
+    #[test]
+    fn elapsed_is_none_without_a_start_time() {
+        assert_eq!(Phase::Idle.elapsed_ms(500), None);
+        assert_eq!(Phase::Verifying.elapsed_ms(500), None);
+        assert_eq!(Phase::Done.elapsed_ms(500), None);
+    }
+
+    #[test]
+    fn elapsed_counts_from_entering_the_phase() {
+        assert_eq!(Phase::Failed { since_ms: 100 }.elapsed_ms(350), Some(250.0));
+        assert_eq!(
+            Phase::Unlocking { since_ms: 1_000 }.elapsed_ms(2_600),
+            Some(1_600.0)
+        );
+    }
+
+    #[test]
+    fn elapsed_never_goes_negative() {
+        assert_eq!(Phase::Failed { since_ms: 500 }.elapsed_ms(100), Some(0.0));
     }
 
     #[test]
