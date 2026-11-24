@@ -83,6 +83,29 @@ impl Default for Input {
     }
 }
 
+/// `input.band_width` と `input.pillar_width` の上限（1920x1080 基準の px）。
+///
+/// 巨大な値を入れるとレーン数が膨らみ、打鍵ごとの割り当てが重くなるので丸める。
+pub const MAX_BAND_WIDTH: u32 = 1920;
+
+/// 帯と柱の幅を上限で丸める。
+fn clamp_input(input: &mut Input) {
+    if input.band_width > MAX_BAND_WIDTH {
+        log::warn!(
+            "input.band_width {} is too large; using {MAX_BAND_WIDTH}",
+            input.band_width
+        );
+        input.band_width = MAX_BAND_WIDTH;
+    }
+    if input.pillar_width > MAX_BAND_WIDTH {
+        log::warn!(
+            "input.pillar_width {} is too large; using {MAX_BAND_WIDTH}",
+            input.pillar_width
+        );
+        input.pillar_width = MAX_BAND_WIDTH;
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Auth {
@@ -156,6 +179,7 @@ pub fn parse(text: &str) -> Result<Loaded, ConfigError> {
         serde_ignored::deserialize(value, |path| unknown_keys.push(path.to_string()))
             .map_err(|e| ConfigError(e.to_string()))?;
     sanitize_date_format(&mut config.appearance);
+    clamp_input(&mut config.input);
     Ok(Loaded {
         config,
         unknown_keys,
@@ -340,6 +364,23 @@ mod tests {
                 DEFAULT_DATE_FORMAT
             );
         }
+    }
+
+    #[test]
+    fn huge_band_and_pillar_widths_are_clamped() {
+        let text = "[input]\nband_width = 4294967295\npillar_width = 99999";
+        let input = parse(text).unwrap().config.input;
+        assert_eq!(input.band_width, MAX_BAND_WIDTH);
+        assert_eq!(input.pillar_width, MAX_BAND_WIDTH);
+    }
+
+    #[test]
+    fn normal_widths_are_kept() {
+        let input = parse("[input]\nband_width = 960\npillar_width = 24")
+            .unwrap()
+            .config
+            .input;
+        assert_eq!((input.band_width, input.pillar_width), (960, 24));
     }
 
     #[test]
