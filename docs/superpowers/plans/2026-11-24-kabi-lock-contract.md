@@ -303,6 +303,10 @@ Plan 2 → 3 → 4 → 5 の順に全タスクを適用し、ビルド・テス�
   ロック要求の前に行う。設計書 5 章 2 の「撮影と並行して準備する」とは違い、撮影とは並行しない
   （GL のコンテキストを持つ `Gpu` が、撮影の join と同じ `prepare_background` から返るため）。
   そのぶんロック要求が Plan 3 の時点より約 30ms 遅くなる。ロック前に済ませることは変わらない。
+  ただし fontconfig の子プロセス（`fc-list`・`fc-match`）は `OverlayHost::new`（`prepare_background` の
+  撮影より前）で起動して撮影と並行に走らせ、`attach_gpu` で答えを集める。待つのは集め始めてから合わせて
+  1 秒までで、過ぎたら子を kill し、埋め込みの Inter・補助フォントなしで続ける（WARN を出す）。
+  ロック前の sway IPC（`focused_output`）は `SWAYSOCK` だけを見て、読み書きに 300ms の期限を付ける。
 - Plan 5: Plan 2 が `App` に置いた `user` は、U2F の helper がユーザー名を自分で取るので読まれず、Plan 5 Task 6 で外した。
 - Plan 6: 上の「コードの変更はしない」の例外として、`src/config.rs` のテストモジュールにテストを 1 つ
   （`example_config_matches_defaults_and_lists_every_key`。`docs/config.example.toml` が初期値と一致し、
