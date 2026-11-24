@@ -30,8 +30,10 @@ instead of a real screenshot.*
 
 ## Requirements
 
-- A Wayland compositor with `ext-session-lock-v1` and `wlr-screencopy-unstable-v1`.
-  Developed and tested on sway (1.8 or newer has `ext-session-lock-v1`).
+- A Wayland compositor with `ext-session-lock-v1`. Developed and tested on sway
+  (1.8 or newer has `ext-session-lock-v1`).
+- Optional: `wlr-screencopy-unstable-v1` (sway has it), for the screenshot background. Without it
+  the background is black (a warning is logged); locking is not affected.
 - A GPU driver with EGL and OpenGL ES 3 (for example Mesa). Without it you get the black fallback.
 - PAM, libxkbcommon, libwayland.
 - A `/etc/pam.d/kabi-lock` service file with both `auth` and `account` lines (the Arch package
@@ -39,8 +41,11 @@ instead of a real screenshot.*
   `auth.pam_service` has no file in `/etc/pam.d` or `/usr/lib/pam.d`.
 - Optional: sway's IPC socket (`SWAYSOCK`, set by sway for its children), to find the monitor
   that was focused when the lock started. Without it the first monitor is used.
-- Optional: fontconfig (`fc-list`, `fc-match`), to find the font set by `appearance.font`. kabi-lock
-  waits at most about 1 second for them; without them, or on a timeout, it uses its built-in Inter.
+- Optional: fontconfig, which the Arch package installs as a dependency (optional when building from
+  source). `fc-list` finds the font set by `appearance.font`; `fc-match` finds a fallback font for the
+  date glyphs in the language of your time locale. kabi-lock waits at most about 1 second for them.
+  Without fontconfig (or on a timeout) the clock and date use the built-in Inter, and non-Latin
+  weekday or month names may show as empty boxes.
 - Optional: [`pam_u2f`](https://developers.yubico.com/pam-u2f/) for YubiKey unlock.
 - Optional: KeePassXC with its Secret Service integration enabled, for the KeePassXC features.
 - To build: Rust 1.95 or newer (required by egui 0.37), `git`, and `clang` (the `pam-sys` crate runs bindgen).
@@ -99,16 +104,19 @@ The messages never contain the password or its length.
 | Exit code | Meaning |
 |---|---|
 | 0 | Unlocked, and exited normally |
-| 1 | Could not lock (no `ext-session-lock-v1`, the request was refused, no Wayland connection, the PAM service file is missing, or the user name is unknown) |
+| 1 | Could not lock (no `ext-session-lock-v1`, the request was refused, no Wayland connection, the PAM service file is missing, or the user name is unknown), or the compositor ended an established lock ("the compositor ended the lock") |
 | 2 | Invalid arguments |
 
 To try it without locking your real session, start a nested sway
-(`WLR_BACKENDS=wayland sway -c nested.conf`, with `exec kabi-lock` in `nested.conf`) and run
-it there.
+(`WLR_BACKENDS=wayland sway -c nested.conf`, with `exec kabi-lock && swaymsg exit` in
+`nested.conf`) and run it there. After you unlock, `kabi-lock` exits with 0 and the nested sway
+exits too; if the lock fails the nested sway stays open, and you can close its window.
 
 Idle and suspend integration is not part of kabi-lock. `kabi-lock` stays in the foreground
 until you unlock, so do not run it from `swayidle -w` for `before-sleep`: that would hold the
-sleep until you unlock.
+sleep until you unlock. Locking on suspend is not supported: without `-w`
+(`swayidle before-sleep kabi-lock`) swayidle does not wait, so the screen may not be locked yet
+when the machine sleeps. An idle timeout works that way, for example `swayidle timeout 300 kabi-lock`.
 
 ## Configuration
 
@@ -117,8 +125,10 @@ A full file with every key and its default is in
 [`docs/config.example.toml`](docs/config.example.toml) (installed as
 `/usr/share/kabi-lock/config.example.toml`).
 
-All keys are optional. Unknown keys are ignored with a warning. If the file is missing,
-unreadable, or invalid, kabi-lock logs a warning and uses the defaults; it always locks.
+All keys are optional. Unknown keys are ignored with a warning. A missing file silently gives the
+defaults; an unreadable or invalid file logs a warning and gives the defaults (the whole file is
+ignored). A broken configuration never stops the lock, with one exception: if the PAM service file
+named by `auth.pam_service` does not exist, kabi-lock refuses to lock (exit code 1).
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -277,10 +287,12 @@ kabi-lock は sway 向けの画面ロッカーです。ロックすると画面�
 フェードインし、時計と日付、打鍵ごとに立ち上がる光の柱を表示します。パスワードでも YubiKey の
 タッチでも解除できます。
 
-- **必要なもの**: `ext-session-lock-v1` と `wlr-screencopy` が使える sway、EGL と OpenGL ES 3 の
-  ドライバー、PAM。YubiKey は `pam_u2f`、KeePassXC 連携は KeePassXC（Secret Service を有効に）が
-  あるときだけ使います。fontconfig（`fc-list`）は任意で、なければ（または約 1 秒待っても
-  終わらなければ）内蔵の Inter を使います。
+- **必要なもの**: `ext-session-lock-v1` が使える sway、EGL と OpenGL ES 3 の
+  ドライバー、PAM。`wlr-screencopy` は任意で、なければ背景が黒になります。YubiKey は `pam_u2f`、
+  KeePassXC 連携は KeePassXC（Secret Service を有効に）があるときだけ使います。fontconfig
+  （`fc-list`、`fc-match`）は Arch のパッケージには依存として入り、ソースから作るときは任意です。
+  なければ（または約 1 秒待っても終わらなければ）時計と日付は内蔵の Inter になり、ラテン文字以外の
+  曜日や月の名前は四角で表示されることがあります。
 - **インストール（Arch）**: `PKGBUILD` を取って `makepkg -si`（上の「Install」を参照）。
   `/etc/pam.d/kabi-lock` が入ります。ソースから入れるときは、`packaging/pam.d/kabi-lock` を
   自分で `/etc/pam.d/` に置いてください。`auth` と `account` の両方の行が必要です
@@ -288,7 +300,8 @@ kabi-lock は sway 向けの画面ロッカーです。ロックすると画面�
   ロックを取らずに終了します。
 - **sway の設定**: `bindsym $mod+l exec kabi-lock`（`contrib/sway/kabi-lock.conf`）。
   sway の初期設定では `$mod+l` が「右へフォーカス」なので、重なる場合はどちらかを変えてください。
-- **設定**: `~/.config/kabi-lock/config.toml`（すべて省略可）。全キーと初期値は
+- **設定**: `~/.config/kabi-lock/config.toml`（すべて省略可。ファイルがなければ黙って初期値、
+  読めない・壊れているときは警告を出して初期値になります）。全キーと初期値は
   `docs/config.example.toml`（インストール後は `/usr/share/kabi-lock/config.example.toml`）にあります。
   時計を出す画面は `display.primary` に出力名（`DP-10`）かモニターの説明文を並べて選びます。
 - **YubiKey**: `authfile` の場所は人ごとに違うので、PAM の設定は自動では入りません。
