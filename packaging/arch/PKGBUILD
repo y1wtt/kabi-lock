@@ -17,7 +17,7 @@ optdepends=('keepassxc: lock and unlock KeePassXC databases around the screen lo
 provides=("$_pkgname")
 conflicts=("$_pkgname")
 backup=('etc/pam.d/kabi-lock')
-options=('!lto')
+options=('!lto' '!debug')
 source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')
 
