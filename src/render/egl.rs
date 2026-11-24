@@ -18,8 +18,11 @@ const PLATFORM_WAYLAND_KHR: egl::Enum = 0x31D8;
 /// EGL ディスプレイ・コンテキストと glow の GL。
 ///
 /// `Drop` は実装しない（プロセスの終わりまで使う）。EGL ディスプレイは `Connection` の
-/// `wl_display` を指しているので、接続を閉じた後に EGL を呼ばないようにするため。
+/// `wl_display` を指しているので、`Gpu` が `Connection` の複製を持ち、`Gpu` が生きている間は
+/// 接続が閉じないようにする。
 pub struct Gpu {
+    /// EGL ディスプレイが指す wl_display を生かしておくための複製。直接は使わない。
+    _conn: Connection,
     egl: egl::Instance<egl::Static>,
     display: egl::Display,
     config: egl::Config,
@@ -33,7 +36,7 @@ impl Gpu {
         let started = Instant::now();
         let egl = egl::Instance::new(egl::Static);
         // SAFETY: display_ptr は conn が生きている間有効な wl_display を指す。
-        // conn（とその複製）はプロセスの終わりまで閉じない。
+        // 返す Gpu が conn の複製（_conn）を持つので、Gpu と EGL ディスプレイを使う間は閉じない。
         let display = unsafe {
             egl.get_platform_display(
                 PLATFORM_WAYLAND_KHR,
@@ -66,6 +69,7 @@ impl Gpu {
                     started.elapsed()
                 );
                 Ok(Gpu {
+                    _conn: conn.clone(),
                     egl,
                     display,
                     config,
