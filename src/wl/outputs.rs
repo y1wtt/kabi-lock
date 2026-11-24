@@ -1,5 +1,9 @@
 //! 出力の情報（名前・説明）。
 
+use std::ffi::OsString;
+use std::os::unix::net::UnixStream;
+use std::time::Duration;
+
 use smithay_client_toolkit::output::OutputInfo;
 
 /// ロック中に覚えておく出力の情報。主画面の選択（Plan 4）とログに使う。
@@ -45,22 +49,43 @@ impl OutputMeta {
     }
 }
 
+/// sway IPC の読み書きの期限。ロック要求の前なので、応答しない sway で止まらないようにする。
+const IPC_TIMEOUT: Duration = Duration::from_millis(300);
+
 /// ロック前に sway でフォーカスしていた出力の名前（sway IPC の `get_outputs` の `focused`）。
 ///
-/// sway でない・`SWAYSOCK` がない・応答が不正なときは `None`（主画面は設定か最初の出力で決める）。
-/// ロックの後はフォーカスの意味が変わるので、ロック前に 1 回だけ呼ぶ。
+/// ソケットは `SWAYSOCK` だけを見る（swayipc の `Connection::new` は `I3SOCK` を先に見て、
+/// どちらもなければ `sway --get-socketpath` を期限なしで呼ぶので使わない）。読み書きには期限を付ける。
+/// sway でない・`SWAYSOCK` がない・つながらない・期限までに答えない・応答が不正なときは `None`
+/// （主画面は設定か最初の出力で決める）。ロックの後はフォーカスの意味が変わるので、ロック前に 1 回だけ呼ぶ。
 pub fn focused_output() -> Option<String> {
-    let mut conn = match swayipc::Connection::new() {
-        Ok(conn) => conn,
+    focused_output_at(std::env::var_os("SWAYSOCK"))
+}
+
+fn focused_output_at(socket: Option<OsString>) -> Option<String> {
+    let Some(socket) = socket else {
+        log::info!("SWAYSOCK is not set; not asking sway for the focused output");
+        return None;
+    };
+    let stream = match UnixStream::connect(&socket) {
+        Ok(stream) => stream,
         Err(e) => {
-            log::debug!("sway IPC unavailable: {e}");
+            log::warn!("cannot connect to sway IPC at {}: {e}", socket.display());
             return None;
         }
     };
+    if let Err(e) = stream
+        .set_read_timeout(Some(IPC_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(IPC_TIMEOUT)))
+    {
+        log::warn!("cannot set the sway IPC timeout: {e}");
+        return None;
+    }
+    let mut conn = swayipc::Connection::from(stream);
     match conn.get_outputs() {
         Ok(outputs) => outputs.into_iter().find(|o| o.focused).map(|o| o.name),
         Err(e) => {
-            log::debug!("sway IPC get_outputs failed: {e}");
+            log::warn!("sway IPC get_outputs failed: {e}");
             None
         }
     }
@@ -90,6 +115,32 @@ mod tests {
         assert_eq!(meta.name, "");
         assert_eq!(meta.description, "");
         assert_eq!(meta.label(), "(unnamed output)");
+    }
+
+    #[test]
+    fn no_swaysock_means_no_focused_output() {
+        assert_eq!(focused_output_at(None), None);
+        assert_eq!(
+            focused_output_at(Some("/nonexistent/kabi-lock-test.sock".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn silent_sway_socket_times_out() {
+        // 接続は受け付けるが何も返さないソケット（accept もしない）
+        let path = std::env::temp_dir().join(format!(
+            "kabi-lock-test-{}-{}.sock",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let start = std::time::Instant::now();
+        let focused = focused_output_at(Some(path.clone().into()));
+        let elapsed = start.elapsed();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(focused, None);
+        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
     }
 
     #[test]
