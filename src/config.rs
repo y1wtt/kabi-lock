@@ -31,6 +31,8 @@ pub struct Appearance {
     pub fade_in_ms: u32,
     pub blur: f32,
     pub date_format: String,
+    /// 時計・日付のフォント（fontconfig のファミリー名）。見つからなければ埋め込みの Inter。
+    pub font: String,
 }
 
 impl Default for Appearance {
@@ -39,9 +41,13 @@ impl Default for Appearance {
             fade_in_ms: 1500,
             blur: 7.0,
             date_format: DEFAULT_DATE_FORMAT.into(),
+            font: DEFAULT_FONT.into(),
         }
     }
 }
+
+/// `appearance.font` の初期値。バイナリに埋め込んだフォントと同じファミリー。
+pub const DEFAULT_FONT: &str = "Inter";
 
 /// `appearance.date_format` の初期値。不正な書式のときもこれに戻す。
 pub const DEFAULT_DATE_FORMAT: &str = "%m/%d";
@@ -381,6 +387,28 @@ mod tests {
             .config
             .input;
         assert_eq!((input.band_width, input.pillar_width), (960, 24));
+    }
+
+    #[test]
+    fn font_defaults_to_inter() {
+        let loaded = parse("").unwrap();
+        assert_eq!(loaded.config.appearance.font, "Inter");
+        assert_eq!(Appearance::default().font, DEFAULT_FONT);
+    }
+
+    #[test]
+    fn font_can_be_chosen() {
+        let loaded = parse("[appearance]\nfont = \"Noto Sans\"").unwrap();
+        assert!(loaded.unknown_keys.is_empty());
+        assert_eq!(loaded.config.appearance.font, "Noto Sans");
+        // ほかの見た目の設定は初期値のまま
+        assert_eq!(loaded.config.appearance.fade_in_ms, 1500);
+        assert_eq!(loaded.config.appearance.date_format, DEFAULT_DATE_FORMAT);
+    }
+
+    #[test]
+    fn font_must_be_a_string() {
+        assert!(parse("[appearance]\nfont = 500").is_err());
     }
 
     #[test]
