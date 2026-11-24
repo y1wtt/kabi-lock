@@ -266,7 +266,7 @@ fn cubic(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], t: f32) -> [f32
 }
 
 use crate::anim::{self, PillarFrame, ShacklePath};
-use crate::config::{self, Input};
+use crate::config::{self, Input, OutputInfo};
 use crate::lanes::{self, Pillar};
 use crate::state::{Machine, Phase};
 
@@ -366,6 +366,60 @@ pub fn build(
         date_text: date.format(wall),
         pillars,
         lock,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 主画面
+
+/// 主画面の選択を覚えておき、出力の一覧が変わったときだけ選び直す。
+#[derive(Debug)]
+pub struct PrimaryTracker {
+    rules: Vec<String>,
+    focused: Option<String>,
+    seen: Vec<OutputInfo>,
+    primary: Option<usize>,
+}
+
+impl PrimaryTracker {
+    /// `rules` は `display.primary`、`focused` はロック前にフォーカスしていた出力名（sway IPC）。
+    pub fn new(rules: Vec<String>, focused: Option<String>) -> PrimaryTracker {
+        PrimaryTracker {
+            rules,
+            focused,
+            seen: Vec::new(),
+            primary: None,
+        }
+    }
+
+    /// 出力の一覧（出力名, description）を渡し、主画面の添字を返す。
+    /// 一覧が前回と同じなら選び直さない（毎フレーム呼んでも文字列を確保しない）。
+    pub fn update<'a, I>(&mut self, outputs: I) -> Option<usize>
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+        I::IntoIter: Clone,
+    {
+        let outputs = outputs.into_iter();
+        let same = outputs.clone().count() == self.seen.len()
+            && outputs
+                .clone()
+                .zip(&self.seen)
+                .all(|((name, desc), seen)| seen.name == name && seen.description == desc);
+        if !same {
+            self.seen = outputs
+                .map(|(name, desc)| OutputInfo {
+                    name: name.to_owned(),
+                    description: desc.to_owned(),
+                })
+                .collect();
+            self.primary = config::select_primary(&self.rules, &self.seen, self.focused.as_deref());
+        }
+        self.primary
+    }
+
+    /// 最後に `update` で選んだ主画面。
+    pub fn primary(&self) -> Option<usize> {
+        self.primary
     }
 }
 
@@ -758,5 +812,47 @@ mod tests {
         );
         assert_eq!(s.pillars[0].width, 64.0);
         assert_eq!(s.pillars[0].x, lanes::lane_x(0, 768, 64));
+    }
+
+    // --- 主画面
+
+    fn outs<'a>(
+        list: &'a [(&'a str, &'a str)],
+    ) -> impl Iterator<Item = (&'a str, &'a str)> + Clone {
+        list.iter().copied()
+    }
+
+    #[test]
+    fn primary_uses_rules_then_focused_then_first() {
+        let list = [
+            ("eDP-1", "Lenovo (eDP-1)"),
+            ("DP-10", "LG ULTRAWIDE (DP-10)"),
+        ];
+        let mut by_rule = PrimaryTracker::new(vec!["LG ULTRAWIDE".into()], Some("eDP-1".into()));
+        assert_eq!(by_rule.update(outs(&list)), Some(1));
+        let mut by_focus = PrimaryTracker::new(vec![], Some("DP-10".into()));
+        assert_eq!(by_focus.update(outs(&list)), Some(1));
+        let mut first = PrimaryTracker::new(vec![], None);
+        assert_eq!(first.update(outs(&list)), Some(0));
+        assert_eq!(first.primary(), Some(0));
+    }
+
+    #[test]
+    fn primary_is_chosen_again_when_outputs_change() {
+        let mut t = PrimaryTracker::new(vec!["DP-10".into()], None);
+        let both = [("eDP-1", ""), ("DP-10", "")];
+        assert_eq!(t.update(outs(&both)), Some(1));
+        // 主画面が抜かれたら残りから選び直す
+        let laptop = [("eDP-1", "")];
+        assert_eq!(t.update(outs(&laptop)), Some(0));
+        // 挿し直したら戻る（並びが変わっても名前で選ぶ）
+        let again = [("DP-10", ""), ("eDP-1", "")];
+        assert_eq!(t.update(outs(&again)), Some(0));
+        assert_eq!(t.update(outs(&[])), None);
+    }
+
+    #[test]
+    fn primary_starts_unknown() {
+        assert_eq!(PrimaryTracker::new(vec![], None).primary(), None);
     }
 }
