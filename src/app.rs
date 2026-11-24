@@ -133,6 +133,13 @@ pub fn run(config: Config) -> Result<(), AppError> {
     let clock = Clock::start();
     let user = auth::current_user()
         .ok_or_else(|| AppError::Other("cannot determine the current user name".into()))?;
+    // サービス定義がないと libpam は全拒否の設定に切り替わる。解除できないロックは取らない
+    let service = &config.auth.pam_service;
+    if !auth::pam_service_exists(service) {
+        return Err(AppError::Other(format!(
+            "PAM service {service:?} not found in /etc/pam.d or /usr/lib/pam.d"
+        )));
+    }
 
     let conn = Connection::connect_to_env().map_err(|e| AppError::NoWayland(e.to_string()))?;
     let (globals, mut queue) =
