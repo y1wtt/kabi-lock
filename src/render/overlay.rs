@@ -677,6 +677,15 @@ impl OverlayHost {
         self.last_keystroke_ms = Some(now_ms);
     }
 
+    /// Enter でパスワードを確かめ始めたとき（確認中になったとき）に呼ぶ。
+    ///
+    /// Enter より前の柱を消す。消さないと、`pillar_fade_ms` が失敗の表示と PAM の時間より長いとき、
+    /// 入力待ちに戻ったところで再び描かれる。確認中に柱のためのフレームを続けないよう、最後の打鍵も忘れる。
+    pub fn submitted(&mut self) {
+        self.lanes.clear();
+        self.last_keystroke_ms = None;
+    }
+
     /// 出力の一覧（出力名, description）を渡して主画面の添字を返す。一覧が変わったときだけ選び直す。
     pub fn refresh_primary<'a, I>(&mut self, outputs: I) -> Option<usize>
     where
@@ -782,6 +791,7 @@ impl OverlayHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{Event, FAIL_HOLD_MS};
     use egui::epaint::text::{Fonts, TextOptions};
     use skrifa::MetadataProvider as _;
     use skrifa::attribute::Weight;
@@ -921,6 +931,63 @@ mod tests {
         let start = Instant::now();
         drop(PendingChild::spawn(Command::new("sleep").arg("5")).unwrap());
         assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    /// GL も fontconfig も sway IPC も使わない OverlayHost。
+    fn host(pillar_fade_ms: u32) -> OverlayHost {
+        let input = config::Input {
+            pillar_fade_ms,
+            ..Default::default()
+        };
+        let count = lanes::lane_count(input.band_width, input.pillar_width);
+        OverlayHost {
+            overlay: None,
+            lanes: LaneAllocator::new(
+                count,
+                u64::from(pillar_fade_ms),
+                fastrand::Rng::with_seed(1),
+            ),
+            primary: PrimaryTracker::new(Vec::new(), None),
+            date: DateStyle::new("%m/%d", chrono::Locale::POSIX),
+            input,
+            font_queries: None,
+            last_keystroke_ms: None,
+            last: None,
+            previous_primary: None,
+        }
+    }
+
+    #[test]
+    fn pillars_from_before_enter_do_not_come_back_after_a_failure() {
+        // 柱が消えるまでの時間が、失敗の表示（1.2 秒）と PAM の時間より長い
+        let mut host = host(5_000);
+        let mut m = Machine::new();
+        host.keystroke(0); // Enter より前の柱
+        m.handle(Event::Submit { empty: false }, 100);
+        host.submitted();
+        m.handle(Event::PasswordChecked { ok: false }, 400);
+        host.keystroke(500); // 失敗中に打った柱
+        let now = 400 + FAIL_HOLD_MS;
+        m.handle(Event::Tick, now);
+        assert_eq!(m.phase(), Phase::Idle);
+        let pillars = host.lanes.pillars(now).to_vec();
+        let wall = chrono::Local::now().fixed_offset();
+        let scene = scene::build(&m, now, 1.0, &pillars, &host.input, &wall, &host.date);
+        // Enter より前の柱は戻ってこず、失敗中に打った柱は入力待ちに戻っても残る
+        assert_eq!(scene.pillars.len(), 1);
+        assert_eq!(
+            pillars.iter().map(|p| p.started_ms).collect::<Vec<_>>(),
+            [500]
+        );
+    }
+
+    #[test]
+    fn submitting_stops_the_pillar_animation() {
+        let mut host = host(900);
+        host.keystroke(0);
+        host.submitted();
+        // 確認中に、Enter の直前の打鍵のせいで主画面を毎フレーム描き続けない
+        assert_eq!(host.last_keystroke_ms, None);
     }
 
     #[test]
