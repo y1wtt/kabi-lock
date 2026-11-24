@@ -28,6 +28,8 @@ impl PasswordChecker {
     /// 結果は `events` に `check` 1 回につき必ず 1 回送る。PAM がエラーを返したとき、
     /// 確認中にパニックしたとき、スレッドが動いていないときも `ok: false` を送る
     /// （送らないと状態が確認中のまま止まり、解除できなくなる）。
+    /// ただし PAM の会話関数の中でのパニックは捕まえられない（pam-client の `pam_converse` は
+    /// `extern "C"` で `catch_unwind` がなく、巻き戻しがそこで abort になる）。
     pub fn spawn(service: String, user: String, events: Sender<AuthEvent>) -> PasswordChecker {
         Self::spawn_with(events, move |password| pam_check(&service, &user, password))
     }
@@ -173,6 +175,7 @@ fn response_cstring(password: &str) -> Option<CString> {
     buffer.extend_from_slice(bytes);
     CString::new(buffer).ok()
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
