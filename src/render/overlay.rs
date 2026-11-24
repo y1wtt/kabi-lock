@@ -466,6 +466,8 @@ pub struct OverlayHost {
     last_keystroke_ms: Option<u64>,
     /// 最後に描いた内容（変わったときだけ描き直すため）。
     last: Option<Drawn>,
+    /// 主画面が替わったときの前の主画面の出力名（重ね物を消すために描き直すまで持つ）。
+    previous_primary: Option<String>,
 }
 
 /// 最後に描いた内容のうち、時間で変わるもの。
@@ -501,6 +503,7 @@ impl OverlayHost {
             font: config.appearance.font.clone(),
             last_keystroke_ms: None,
             last: None,
+            previous_primary: None,
         }
     }
 
@@ -525,14 +528,24 @@ impl OverlayHost {
         I: IntoIterator<Item = (&'a str, &'a str)>,
         I::IntoIter: Clone,
     {
-        let before = self.primary.primary();
-        let after = self.primary.update(outputs);
-        if after != before {
-            log::info!("overlay output index: {after:?}");
+        let index = self.primary.update(outputs);
+        // 添字ではなく出力名で比べる（主画面が抜かれて別の出力が同じ添字に詰めてきたときも描き直す）
+        if self.primary.changed() {
+            log::info!("overlay output index: {index:?}");
             // 新しい主画面には最初から描き直す
             self.last = None;
+            // 前の主画面には重ね物が残っているので、App に重ね物なしで描き直してもらう
+            if self.overlay.is_some() {
+                self.previous_primary = self.primary.previous_name().map(str::to_owned);
+            }
         }
-        after
+        index
+    }
+
+    /// 主画面が替わったとき、前の主画面の出力名を 1 度だけ返す（`refresh_primary` の後で呼ぶ）。
+    /// その出力がまだあれば、重ね物を消すために描き直す。
+    pub fn take_previous_primary(&mut self) -> Option<String> {
+        self.previous_primary.take()
     }
 
     /// 出力 `index` の重ね物が動き続けている（毎フレーム描き直す）か:
