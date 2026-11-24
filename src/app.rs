@@ -40,6 +40,7 @@ use crate::input::{self, KeyAction};
 use crate::password::PasswordBuffer;
 use crate::render::background::{self, Background};
 use crate::render::egl::{Gpu, GpuSurface};
+use crate::render::overlay::OverlayHost;
 use crate::render::{OutputRender, shm::ShmBlack};
 use crate::state::{Action, Event, Machine};
 use crate::wl::outputs::OutputMeta;
@@ -173,6 +174,11 @@ pub struct App {
     pub(crate) clock: Clock,
     /// 最初の configure を受けた時刻。フェードはここから測る（Plan 3）。
     pub(crate) first_configure_ms: Option<u64>,
+    /// 主画面への重ね描き（時計・日付・光の柱・錠）。Plan 4。
+    ///
+    /// `gpu` より前に置く。フィールドは宣言順に捨てられるので、egui_glow の GL の後片付けが
+    /// EGL のコンテキストより先に行われる。
+    pub(crate) overlay: OverlayHost,
     /// EGL。使えなければ `None`（全出力を shm の黒で描く）。
     pub(crate) gpu: Option<Gpu>,
     /// 背景のシェーダーと出力ごとのテクスチャ。`gpu` が `Some` のときだけ `Some`。
@@ -262,6 +268,8 @@ pub fn run(config: Config) -> Result<(), AppError> {
     let (auth_tx, auth_rx) = channel::channel::<AuthEvent>();
     let checker = PasswordChecker::spawn(config.auth.pam_service.clone(), user.clone(), auth_tx);
 
+    // 重ね物の状態（GL はまだ使わない）。ロック前にフォーカスしていた出力もここで sway に尋ねる
+    let overlay = OverlayHost::new(&config);
     let mut app = App {
         conn: conn.clone(),
         qh: qh.clone(),
@@ -283,6 +291,7 @@ pub fn run(config: Config) -> Result<(), AppError> {
         checker,
         clock,
         first_configure_ms: None,
+        overlay,
         gpu: None,
         background: None,
         exit: None,
@@ -319,6 +328,10 @@ pub fn run(config: Config) -> Result<(), AppError> {
     let (gpu, background) = prepare_background(&conn, app.config.appearance.blur);
     app.gpu = gpu;
     app.background = background;
+    // フォント・シェーダー・アトラスをロック前に用意する（失敗しても重ね物なしで続ける）
+    if let Some(gpu) = app.gpu.as_ref() {
+        app.overlay.attach_gpu(gpu);
+    }
     WaylandSource::new(conn, queue)
         .insert(handle)
         .map_err(|e| AppError::Other(format!("wayland source: {}", e.error)))?;
@@ -343,8 +356,19 @@ pub fn run(config: Config) -> Result<(), AppError> {
 }
 
 impl App {
+    /// 主画面の添字（出力の一覧が変わっていれば選び直す）。Plan 4。
+    pub(crate) fn primary_index(&mut self) -> Option<usize> {
+        self.overlay.refresh_primary(
+            self.outputs
+                .iter()
+                .map(|o| (o.meta.name.as_str(), o.meta.description.as_str())),
+        )
+    }
+
     /// 描画の入口。出力 `index` の今の状態を描いて commit する。
     pub(crate) fn draw_output(&mut self, index: usize) {
+        // 出力の一覧が変わっていれば主画面を選び直す（Plan 4）
+        self.primary_index();
         let now = self.clock.now_ms();
         let fade = background::fade_for(
             self.first_configure_ms,
@@ -395,7 +419,15 @@ impl App {
                     fade,
                     reveal,
                 );
-                // Plan 4: ここで主画面に重ね物を描く
+                // 主画面なら時計・日付・光の柱・錠を重ねる（Plan 4）
+                self.overlay.draw(
+                    gpu,
+                    index,
+                    (buffer_width, buffer_height),
+                    &self.machine,
+                    now,
+                    fade,
+                );
                 let wl_surface = out.lock_surface.wl_surface();
                 // buffer_scale とフレームコールバックは、swap の commit で一緒に反映される
                 wl_surface.set_buffer_scale(scale);
