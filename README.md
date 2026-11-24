@@ -78,6 +78,9 @@ The font (Inter) is built into the binary. The PAM file is required, and it need
 `/etc/pam.d/kabi-lock` kabi-lock refuses to lock, and a file with `auth` alone rejects every
 password. Create it before you test, so that you cannot lock yourself out.
 
+A hand-copied `/etc/pam.d/kabi-lock` belongs to no package. If you install the Arch package later,
+remove that file first, or `pacman -U` fails with "exists in filesystem".
+
 If `kabi-lock` is not in the `PATH` that sway uses, write the full path in the key binding.
 
 ## Usage
