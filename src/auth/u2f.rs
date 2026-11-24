@@ -666,6 +666,30 @@ mod supervisor_tests {
         }
     }
 
+    /// `/proc/<pid>/status` の `SigIgn` に SIGTERM が入るまで待つ。
+    fn wait_until_ignoring_sigterm(pid: i32) {
+        // SigIgn はシグナル番号 n をビット n-1 で表す 16 進数
+        let sigterm_bit = 1u64 << (Signal::SIGTERM as i32 - 1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let ignored = std::fs::read_to_string(format!("/proc/{pid}/status"))
+                .ok()
+                .and_then(|status| {
+                    let line = status.lines().find(|l| l.starts_with("SigIgn:"))?;
+                    u64::from_str_radix(line["SigIgn:".len()..].trim(), 16).ok()
+                })
+                .unwrap_or(0);
+            if ignored & sigterm_bit != 0 {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the helper did not ignore SIGTERM"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// 回収済みで、もう存在しないか。
     fn process_gone(pid: i32) -> bool {
         kill(Pid::from_raw(pid), None) == Err(Errno::ESRCH)
@@ -736,7 +760,7 @@ mod supervisor_tests {
         .unwrap();
         let pid = wait_for_child(&handle);
         // sh が trap を設定し終えるまで待つ（その前の SIGTERM では普通に終わってしまう）
-        thread::sleep(Duration::from_millis(200));
+        wait_until_ignoring_sigterm(pid);
         let started = Instant::now();
         handle.stop();
         let elapsed = started.elapsed();
