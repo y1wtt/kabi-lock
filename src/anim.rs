@@ -41,11 +41,6 @@ pub fn pillar_at(elapsed_ms: f32, life_ms: f32) -> Option<PillarFrame> {
     Some(PillarFrame { scale_y, opacity })
 }
 
-/// 錠の解除アニメーション全体（跳ね上がり + 回転）の長さ。
-pub const SHACKLE_MS: f32 = 800.0;
-/// 跳ね上がりの長さ。
-const LIFT_MS: f32 = 260.0;
-
 /// 解除（錠が開く → ぼかしが晴れる）の時間配分。設定の `appearance.unlock_open_ms` と
 /// `appearance.unlock_reveal_ms` から作る。
 ///
@@ -117,23 +112,32 @@ impl ShackleGeom {
     };
 }
 
+/// `start_ms` から `len_ms` かけて 0.0 → 1.0 に進む割合。
+///
+/// `len_ms` が 0 以下なら 0 で割らず、`start_ms` に達した時点で 1.0 にする（一瞬で終わる）。
+fn progress(elapsed_ms: f32, start_ms: f32, len_ms: f32) -> f32 {
+    if len_ms <= 0.0 {
+        return if elapsed_ms >= start_ms { 1.0 } else { 0.0 };
+    }
+    ((elapsed_ms - start_ms) / len_ms).clamp(0.0, 1.0)
+}
+
 /// 解除開始からの経過時間での U 字の状態。
 ///
-/// 0〜260ms で真上に跳ね（-11px まで行って -9px に戻る）、260〜800ms で長い足を軸に
-/// 180° 回る。U 字は太さ一定の丸棒として扱い、短い足の x を cos で動かす
+/// 初期値（`open_ms` 800）では 0〜260ms で真上に跳ね（-11px まで行って -9px に戻る）、
+/// 260〜800ms で長い足を軸に 180° 回る。`open_ms` を変えると同じ割合で伸び縮みする。
+/// U 字は太さ一定の丸棒として扱い、短い足の x を cos で動かす
 /// （左右反転のスケールは線が細くなって紙のように見えるので使わない）。
-pub fn shackle_at(elapsed_ms: f32) -> ShackleGeom {
-    let lift_y = if elapsed_ms <= 0.0 {
-        0.0
+/// 閉じた形は `ShackleGeom::CLOSED`（`open_ms` が 0 だと経過 0ms でもう開いている）。
+pub fn shackle_at(elapsed_ms: f32, timing: &UnlockTiming) -> ShackleGeom {
+    let lift_ms = timing.lift_ms();
+    let p = progress(elapsed_ms, 0.0, lift_ms);
+    let lift_y = if p < 0.6 {
+        -11.0 * (p / 0.6)
     } else {
-        let p = (elapsed_ms / LIFT_MS).min(1.0);
-        if p < 0.6 {
-            -11.0 * (p / 0.6)
-        } else {
-            -11.0 + 2.0 * ((p - 0.6) / 0.4)
-        }
+        -11.0 + 2.0 * ((p - 0.6) / 0.4)
     };
-    let q = ((elapsed_ms - LIFT_MS) / (SHACKLE_MS - LIFT_MS)).clamp(0.0, 1.0);
+    let q = progress(elapsed_ms, lift_ms, timing.open_ms - lift_ms);
     let eased = if q < 0.5 {
         2.0 * q * q
     } else {
@@ -220,20 +224,21 @@ pub fn shake_offset(elapsed_ms: f32) -> f32 {
     0.0
 }
 
-/// 解除開始から、ぼかしが晴れ始めるまで。
-pub const REVEAL_START_MS: f32 = 900.0;
-/// ぼかしが晴れ切るまでの長さ。
-pub const REVEAL_MS: f32 = 700.0;
-
 /// 解除開始からの経過時間での、ぼかしの晴れ具合（0.0 = ぼけたまま、1.0 = くっきり）。
+/// `timing.reveal_start_ms()` から `timing.reveal_ms` かけて進む。
 /// 時計などの重ね物の不透明度は `1.0 - reveal_progress` にする。
-pub fn reveal_progress(elapsed_ms: f32) -> f32 {
-    ((elapsed_ms - REVEAL_START_MS) / REVEAL_MS).clamp(0.0, 1.0)
+pub fn reveal_progress(elapsed_ms: f32, timing: &UnlockTiming) -> f32 {
+    progress(elapsed_ms, timing.reveal_start_ms(), timing.reveal_ms)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const D: UnlockTiming = UnlockTiming {
+        open_ms: 800.0,
+        reveal_ms: 700.0,
+    };
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-3
@@ -276,7 +281,7 @@ mod tests {
 
     #[test]
     fn shackle_is_closed_at_start() {
-        let g = shackle_at(0.0);
+        let g = shackle_at(0.0, &D);
         assert_eq!(g.lift_y, 0.0);
         assert!(close(g.short_leg_x, SHORT_LEG_X_CLOSED));
     }
@@ -284,26 +289,26 @@ mod tests {
     #[test]
     fn shackle_overshoots_then_settles() {
         // 0.6 × 260ms で一番高く（-11px）、260ms で -9px に落ち着く
-        assert!(close(shackle_at(156.0).lift_y, -11.0));
-        assert!(close(shackle_at(260.0).lift_y, -9.0));
+        assert!(close(shackle_at(156.0, &D).lift_y, -11.0));
+        assert!(close(shackle_at(260.0, &D).lift_y, -9.0));
         // 跳ね上がりの間は回らない
-        assert!(close(shackle_at(260.0).short_leg_x, SHORT_LEG_X_CLOSED));
+        assert!(close(shackle_at(260.0, &D).short_leg_x, SHORT_LEG_X_CLOSED));
     }
 
     #[test]
     fn shackle_swivels_around_the_long_leg() {
         // 回転の真ん中で短い足は長い足と重なる（真横から見た形）
-        assert!(close(shackle_at(530.0).short_leg_x, LONG_LEG_X));
+        assert!(close(shackle_at(530.0, &D).short_leg_x, LONG_LEG_X));
         // 回り切ると反対側（42 + 20 = 62）に出る
-        let open = shackle_at(SHACKLE_MS);
+        let open = shackle_at(D.open_ms, &D);
         assert!(close(open.short_leg_x, 62.0));
         assert!(close(open.lift_y, -9.0));
-        assert_eq!(shackle_at(5000.0), open);
+        assert_eq!(shackle_at(5000.0, &D), open);
     }
 
     #[test]
     fn closed_path_is_a_symmetric_semicircle() {
-        let p = shackle_path(shackle_at(0.0));
+        let p = shackle_path(shackle_at(0.0, &D));
         assert_eq!(p.short_leg_bottom, [22.0, 26.0]);
         assert_eq!(p.short_leg_top, [22.0, 18.0]);
         // 頂点は左右の足の真ん中、高さ 8
@@ -352,14 +357,71 @@ mod tests {
 
     #[test]
     fn reveal_runs_after_the_shackle_opens() {
-        assert_eq!(reveal_progress(0.0), 0.0);
-        assert_eq!(reveal_progress(REVEAL_START_MS), 0.0);
-        assert!(close(
-            reveal_progress(REVEAL_START_MS + REVEAL_MS / 2.0),
-            0.5
-        ));
-        assert_eq!(reveal_progress(REVEAL_START_MS + REVEAL_MS), 1.0);
-        const { assert!(REVEAL_START_MS >= SHACKLE_MS) };
+        assert_eq!(reveal_progress(0.0, &D), 0.0);
+        assert_eq!(reveal_progress(900.0, &D), 0.0);
+        assert!(close(reveal_progress(900.0 + 350.0, &D), 0.5));
+        assert_eq!(reveal_progress(1600.0, &D), 1.0);
+        assert!(D.reveal_start_ms() >= D.open_ms);
+    }
+
+    #[test]
+    fn faster_timing_opens_the_shackle_sooner() {
+        let fast = UnlockTiming {
+            open_ms: 400.0,
+            reveal_ms: 300.0,
+        };
+        // 跳ね上がりは 130ms（一番高いのは 0.6 × 130 = 78ms）
+        assert!(close(shackle_at(78.0, &fast).lift_y, -11.0));
+        let lifted = shackle_at(130.0, &fast);
+        assert!(close(lifted.lift_y, -9.0));
+        assert!(close(lifted.short_leg_x, SHORT_LEG_X_CLOSED));
+        // 回転の真ん中（130 + 135ms）で真横
+        assert!(close(shackle_at(265.0, &fast).short_leg_x, LONG_LEG_X));
+        // open_ms で開き切り、初期値で開き切った形と同じになる
+        let open = shackle_at(400.0, &fast);
+        assert_eq!(open, shackle_at(D.open_ms, &D));
+        assert!(close(open.short_leg_x, 62.0));
+        assert_eq!(shackle_at(5000.0, &fast), open);
+    }
+
+    #[test]
+    fn faster_timing_reveals_sooner() {
+        let fast = UnlockTiming {
+            open_ms: 400.0,
+            reveal_ms: 300.0,
+        };
+        assert_eq!(reveal_progress(450.0, &fast), 0.0);
+        assert!(close(reveal_progress(600.0, &fast), 0.5));
+        assert_eq!(reveal_progress(750.0, &fast), 1.0);
+    }
+
+    #[test]
+    fn zero_open_time_opens_at_once() {
+        let instant = UnlockTiming {
+            open_ms: 0.0,
+            reveal_ms: 700.0,
+        };
+        let g = shackle_at(0.0, &instant);
+        assert!(g.lift_y.is_finite() && g.short_leg_x.is_finite());
+        assert_eq!(g, shackle_at(D.open_ms, &D));
+        // ぼかしは解除開始からすぐ晴れ始める
+        assert!(close(reveal_progress(350.0, &instant), 0.5));
+    }
+
+    #[test]
+    fn zero_reveal_time_clears_at_the_reveal_start() {
+        let instant = UnlockTiming {
+            open_ms: 800.0,
+            reveal_ms: 0.0,
+        };
+        assert_eq!(reveal_progress(899.0, &instant), 0.0);
+        assert_eq!(reveal_progress(900.0, &instant), 1.0);
+        assert_eq!(reveal_progress(5000.0, &instant), 1.0);
+        let both = UnlockTiming {
+            open_ms: 0.0,
+            reveal_ms: 0.0,
+        };
+        assert_eq!(reveal_progress(0.0, &both), 1.0);
     }
 
     #[test]
@@ -413,7 +475,7 @@ mod tests {
                 short_leg_x: SHORT_LEG_X_CLOSED,
             }
         );
-        assert_eq!(shackle_at(0.0), ShackleGeom::CLOSED);
+        assert_eq!(shackle_at(0.0, &D), ShackleGeom::CLOSED);
     }
 
     #[test]
@@ -430,7 +492,7 @@ mod tests {
 
     #[test]
     fn closed_shackle_ends_are_hidden_by_the_body() {
-        let p = shackle_path(shackle_at(0.0));
+        let p = shackle_path(shackle_at(0.0, &D));
         for end in [p.short_leg_bottom, p.long_leg_bottom] {
             assert!(end[0] > BODY_X && end[0] < BODY_X + BODY_W);
             assert!(end[1] > BODY_Y && end[1] < BODY_Y + BODY_H);
@@ -440,16 +502,16 @@ mod tests {
     #[test]
     fn long_leg_stays_in_the_body_during_the_whole_unlock() {
         // 一番高く跳ねたとき（-11px）でも、長い足の下端（丸い端を含む）は本体に隠れる
-        for ms in (0..=SHACKLE_MS as u32).step_by(10) {
-            let p = shackle_path(shackle_at(ms as f32));
+        for ms in (0..=D.open_ms as u32).step_by(10) {
+            let p = shackle_path(shackle_at(ms as f32, &D));
             assert!(p.long_leg_bottom[1] - SHACKLE_STROKE / 2.0 > BODY_Y);
         }
     }
 
     #[test]
     fn shackle_path_stays_finite_and_in_range() {
-        for ms in (0..=SHACKLE_MS as u32).step_by(5) {
-            let p = shackle_path(shackle_at(ms as f32));
+        for ms in (0..=D.open_ms as u32).step_by(5) {
+            let p = shackle_path(shackle_at(ms as f32, &D));
             let points = [
                 p.short_leg_bottom,
                 p.short_leg_top,

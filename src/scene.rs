@@ -309,8 +309,9 @@ pub fn build(
 ) -> Scene {
     let phase = machine.phase();
     let elapsed = phase.elapsed_ms(now_ms).unwrap_or(0.0);
+    let timing = machine.unlock_timing();
     let reveal = match phase {
-        Phase::Unlocking { .. } => anim::reveal_progress(elapsed),
+        Phase::Unlocking { .. } => anim::reveal_progress(elapsed, &timing),
         Phase::Done => 1.0,
         _ => 0.0,
     };
@@ -320,10 +321,10 @@ pub fn build(
         fade_alpha.clamp(0.0, 1.0)
     };
 
-    let closed = anim::shackle_path(anim::shackle_at(0.0));
+    let closed = anim::shackle_path(anim::ShackleGeom::CLOSED);
     let lock = machine.lock_visible().then(|| match phase {
         Phase::Unlocking { .. } => LockDraw {
-            path: anim::shackle_path(anim::shackle_at(elapsed)),
+            path: anim::shackle_path(anim::shackle_at(elapsed, &timing)),
             shake_x: 0.0,
         },
         Phase::Failed { .. } => LockDraw {
@@ -461,6 +462,7 @@ impl PrimaryTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anim::{ShackleGeom, UnlockTiming};
     use crate::state::{Event, FAIL_HOLD_MS};
     use chrono::TimeZone;
 
@@ -619,7 +621,7 @@ mod tests {
 
     #[test]
     fn closed_shackle_polyline_runs_from_short_leg_to_long_leg() {
-        let path = anim::shackle_path(anim::shackle_at(0.0));
+        let path = anim::shackle_path(ShackleGeom::CLOSED);
         let pts = shackle_polyline(&path, 8);
         assert_eq!(pts.len(), 2 + 8 * 2 + 1);
         assert_eq!(pts[0], [22.0, 26.0]);
@@ -636,7 +638,7 @@ mod tests {
 
     #[test]
     fn edge_on_shackle_is_a_single_rod() {
-        let path = anim::shackle_path(anim::shackle_at(530.0));
+        let path = anim::shackle_path(anim::shackle_at(530.0, &UnlockTiming::default()));
         let pts = shackle_polyline(&path, 8);
         assert_eq!(pts.len(), 2);
         assert!(close(pts[0][0], anim::LONG_LEG_X));
@@ -647,7 +649,7 @@ mod tests {
     #[test]
     fn swivelled_shackle_polyline_is_finite() {
         for ms in (0..=800).step_by(20) {
-            let path = anim::shackle_path(anim::shackle_at(ms as f32));
+            let path = anim::shackle_path(anim::shackle_at(ms as f32, &UnlockTiming::default()));
             let pts = shackle_polyline(&path, 12);
             assert!(pts.len() >= 2);
             assert!(pts.iter().flatten().all(|v| v.is_finite()));
@@ -710,10 +712,10 @@ mod tests {
     #[test]
     fn opacity_is_fade_times_one_minus_reveal() {
         let m = unlocking_at(1000);
-        let half = anim::REVEAL_START_MS + anim::REVEAL_MS / 2.0;
-        let s = scene(&m, 1000 + half as u64, 0.8, &[]);
+        // 初期値では 900ms から 700ms かけて晴れる
+        let s = scene(&m, 1000 + 900 + 350, 0.8, &[]);
         assert!(close(s.opacity, 0.8 * 0.5));
-        let s = scene(&m, 1000 + anim::REVEAL_START_MS as u64, 1.0, &[]);
+        let s = scene(&m, 1000 + 900, 1.0, &[]);
         assert_eq!(s.opacity, 1.0);
         let s = scene(&m, 1000 + crate::state::UNLOCK_TOTAL_MS, 1.0, &[]);
         assert_eq!(s.opacity, 0.0);
@@ -725,7 +727,7 @@ mod tests {
         m.handle(Event::Submit { empty: false }, 10);
         let s = scene(&m, 500, 1.0, &[]);
         let lock = s.lock.unwrap();
-        assert_eq!(lock.path, anim::shackle_path(anim::shackle_at(0.0)));
+        assert_eq!(lock.path, anim::shackle_path(ShackleGeom::CLOSED));
         assert_eq!(lock.shake_x, 0.0);
     }
 
@@ -737,7 +739,7 @@ mod tests {
         let lock = s.lock.unwrap();
         assert!(close(lock.shake_x, anim::shake_offset(at as f32 - 100.0)));
         assert!(lock.shake_x < -9.0);
-        assert_eq!(lock.path, anim::shackle_path(anim::shackle_at(0.0)));
+        assert_eq!(lock.path, anim::shackle_path(ShackleGeom::CLOSED));
         // 震え終わっても、入力待ちに戻るまでは錠を出したまま
         let s = scene(&m, 100 + FAIL_HOLD_MS - 1, 1.0, &[]);
         assert_eq!(s.lock.unwrap().shake_x, 0.0);
@@ -755,8 +757,46 @@ mod tests {
         let m = unlocking_at(1000);
         let s = scene(&m, 1000 + 400, 1.0, &[]);
         let lock = s.lock.unwrap();
-        assert_eq!(lock.path, anim::shackle_path(anim::shackle_at(400.0)));
+        assert_eq!(
+            lock.path,
+            anim::shackle_path(anim::shackle_at(400.0, &UnlockTiming::default()))
+        );
         assert_eq!(lock.shake_x, 0.0);
+    }
+
+    #[test]
+    fn unlocking_follows_the_machine_unlock_timing() {
+        let fast = UnlockTiming {
+            open_ms: 400.0,
+            reveal_ms: 300.0,
+        };
+        let mut m = Machine::with_unlock_timing(fast);
+        m.handle(Event::U2fSucceeded, 1000);
+        // 400ms で錠が開き切る
+        let open = scene(&m, 1000 + 400, 1.0, &[]).lock.unwrap();
+        assert_eq!(
+            open.path,
+            anim::shackle_path(anim::shackle_at(800.0, &UnlockTiming::default()))
+        );
+        // 450ms から 300ms かけて重ね物が消える
+        assert_eq!(scene(&m, 1000 + 450, 1.0, &[]).opacity, 1.0);
+        assert!(close(scene(&m, 1000 + 600, 1.0, &[]).opacity, 0.5));
+        assert_eq!(scene(&m, 1000 + 750, 1.0, &[]).opacity, 0.0);
+    }
+
+    #[test]
+    fn instant_unlock_timing_never_shows_the_closed_lock() {
+        let mut m = Machine::with_unlock_timing(UnlockTiming {
+            open_ms: 0.0,
+            reveal_ms: 0.0,
+        });
+        m.handle(Event::U2fSucceeded, 1000);
+        let s = scene(&m, 1000, 1.0, &[]);
+        assert_ne!(
+            s.lock.unwrap().path,
+            anim::shackle_path(ShackleGeom::CLOSED)
+        );
+        assert_eq!(s.opacity, 0.0);
     }
 
     #[test]

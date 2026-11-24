@@ -414,7 +414,7 @@ impl App {
             self.config.appearance.fade_in_ms,
         );
         let phase = self.machine.phase();
-        let reveal = background::reveal_for(phase, now);
+        let reveal = background::reveal_for(phase, now, &self.machine.unlock_timing());
         let animating = background::needs_frames(fade, phase)
             || self.overlay.animating(index, &self.machine, now);
         let Some(out) = self.outputs.get_mut(index) else {

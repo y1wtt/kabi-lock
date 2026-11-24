@@ -10,6 +10,7 @@ use glow::HasContext;
 use log::{debug, warn};
 use wayland_client::protocol::wl_shm;
 
+use crate::anim::UnlockTiming;
 use crate::render::egl::Gpu;
 use crate::state::Phase;
 use crate::wl::screencopy::Screenshot;
@@ -118,11 +119,12 @@ pub fn fade_for(first_configure_ms: Option<u64>, now_ms: u64, fade_in_ms: u32) -
     }
 }
 
-/// ぼかし → くっきりの進み具合。解除中だけ進み、ロックを外した後（`Done`）は 1.0。
-pub fn reveal_for(phase: Phase, now_ms: u64) -> f32 {
+/// ぼかし → くっきりの進み具合。解除中だけ `timing` に従って進み、ロックを外した後（`Done`）は 1.0。
+/// `timing` は状態機械と同じもの（`Machine::unlock_timing`）を渡す。
+pub fn reveal_for(phase: Phase, now_ms: u64, timing: &UnlockTiming) -> f32 {
     match phase {
         Phase::Unlocking { .. } => {
-            crate::anim::reveal_progress(phase.elapsed_ms(now_ms).unwrap_or(0.0))
+            crate::anim::reveal_progress(phase.elapsed_ms(now_ms).unwrap_or(0.0), timing)
         }
         Phase::Done => 1.0,
         _ => 0.0,
@@ -565,6 +567,11 @@ unsafe fn uniform_f32(gl: &glow::Context, program: glow::Program, name: &str, va
 mod tests {
     use super::*;
 
+    const D: UnlockTiming = UnlockTiming {
+        open_ms: 800.0,
+        reveal_ms: 700.0,
+    };
+
     fn close(a: f32, b: f32, eps: f32) -> bool {
         (a - b).abs() < eps
     }
@@ -706,18 +713,34 @@ mod tests {
 
     #[test]
     fn reveal_runs_only_while_unlocking() {
-        assert_eq!(reveal_for(Phase::Idle, 5000), 0.0);
-        assert_eq!(reveal_for(Phase::Verifying, 5000), 0.0);
-        assert_eq!(reveal_for(Phase::Failed { since_ms: 0 }, 5000), 0.0);
+        assert_eq!(reveal_for(Phase::Idle, 5000, &D), 0.0);
+        assert_eq!(reveal_for(Phase::Verifying, 5000, &D), 0.0);
+        assert_eq!(reveal_for(Phase::Failed { since_ms: 0 }, 5000, &D), 0.0);
         let unlocking = Phase::Unlocking { since_ms: 1000 };
-        assert_eq!(reveal_for(unlocking, 1000), 0.0);
-        let mid = 1000 + (crate::anim::REVEAL_START_MS + crate::anim::REVEAL_MS / 2.0) as u64;
-        assert!(close(reveal_for(unlocking, mid), 0.5, 1e-3));
+        assert_eq!(reveal_for(unlocking, 1000, &D), 0.0);
+        // 初期値では 900ms から 700ms かけて晴れる
+        assert!(close(
+            reveal_for(unlocking, 1000 + 900 + 350, &D),
+            0.5,
+            1e-3
+        ));
         assert_eq!(
-            reveal_for(unlocking, 1000 + crate::state::UNLOCK_TOTAL_MS),
+            reveal_for(unlocking, 1000 + crate::state::UNLOCK_TOTAL_MS, &D),
             1.0
         );
-        assert_eq!(reveal_for(Phase::Done, 0), 1.0);
+        assert_eq!(reveal_for(Phase::Done, 0, &D), 1.0);
+    }
+
+    #[test]
+    fn reveal_follows_the_unlock_timing() {
+        let fast = UnlockTiming {
+            open_ms: 400.0,
+            reveal_ms: 300.0,
+        };
+        let unlocking = Phase::Unlocking { since_ms: 1000 };
+        assert_eq!(reveal_for(unlocking, 1000 + 450, &fast), 0.0);
+        assert!(close(reveal_for(unlocking, 1000 + 600, &fast), 0.5, 1e-3));
+        assert_eq!(reveal_for(unlocking, 1000 + fast.total_ms(), &fast), 1.0);
     }
 
     #[test]
