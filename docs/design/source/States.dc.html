@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>kabi-lock 錠の状態</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&amp;family=Noto+Sans+JP:wght@400;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#3a4252}a:hover{color:#141820}
+@keyframes kabiShake{0%,100%{transform:translateX(0)}12%{transform:translateX(-10px)}28%{transform:translateX(9px)}44%{transform:translateX(-7px)}60%{transform:translateX(5px)}76%{transform:translateX(-3px)}88%{transform:translateX(1px)}}
+.kabi-shake{animation:kabiShake 450ms ease-in-out}
+.kabi-replay{align-self:flex-start;min-height:44px;padding:0 20px;border:1px solid #c5cad4;border-radius:8px;background:#ffffff;color:#141820;font:inherit;font-size:16px;cursor:pointer}
+.kabi-replay:hover{background:#eef0f4}
+</style>
+</helmet>
+<div style="width: 1920px; height: 600px; box-sizing: border-box; padding: 56px 64px; background: #f4f5f7; font-family: 'Inter', 'Noto Sans JP', sans-serif; color: #141820; display: flex; flex-direction: column; gap: 32px">
+  <div style="display: flex; align-items: baseline; gap: 20px">
+    <h1 style="margin: 0; font-size: 32px; font-weight: 700">錠の状態</h1>
+    <p style="margin: 0; font-size: 18px; color: #4a5263">錠は普段は出さず、Enter を押したときだけ時計の上に現れて結果を見せる。Play で開くと再生ボタンが使える</p>
+  </div>
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 48px">
+    <figure style="margin: 0; display: flex; flex-direction: column; gap: 14px">
+      <div style="height: 300px; border-radius: 10px; background: #12151b; display: flex; align-items: center; justify-content: center">
+        <svg viewBox="0 0 64 56" width="128" height="112" role="img" aria-label="閉じた錠">
+          <path d="M22 26 V18 A10 10 0 0 1 42 18 V40" fill="none" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"></path>
+          <rect x="14" y="24" width="36" height="28" rx="6" fill="#ffffff"></rect>
+        </svg>
+      </div>
+      <figcaption style="font-size: 17px; color: #2b3240"><strong>形</strong>　本体は角丸で塗りつぶし、鍵穴なし。U字の上は半円。右足が長く本体の中まで入っている</figcaption>
+    </figure>
+    <figure style="margin: 0; display: flex; flex-direction: column; gap: 14px">
+      <div style="height: 300px; border-radius: 10px; background: #12151b; display: flex; align-items: center; justify-content: center">
+        <div>
+          <svg viewBox="0 0 64 56" width="128" height="112" role="img" aria-label="解除の動き：U字が跳ね上がってから右足を軸に回る">
+            <path d="{{shackleD}}" transform="translate(0 {{shackleY}})" fill="none" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"></path>
+            <rect x="14" y="24" width="36" height="28" rx="6" fill="#ffffff"></rect>
+          </svg>
+        </div>
+      </div>
+      <figcaption style="font-size: 17px; color: #2b3240"><strong>解除</strong>　U字が真上にポンと跳ね、そのまま右足を軸に棒のまま奥へ回って反対側に開く（約0.8秒）→ ぼかしが晴れて画面が戻る</figcaption>
+      <button type="button" class="kabi-replay" onClick="{{replayUnlock}}">解除を再生</button>
+    </figure>
+    <figure style="margin: 0; display: flex; flex-direction: column; gap: 14px">
+      <div style="height: 300px; border-radius: 10px; background: #12151b; display: flex; align-items: center; justify-content: center">
+        <div class="{{failClass}}">
+          <svg viewBox="0 0 64 56" width="128" height="112" role="img" aria-label="失敗の動き：錠が左右に震える">
+            <path d="M22 26 V18 A10 10 0 0 1 42 18 V40" fill="none" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"></path>
+            <rect x="14" y="24" width="36" height="28" rx="6" fill="#ffffff"></rect>
+          </svg>
+        </div>
+      </div>
+      <figcaption style="font-size: 17px; color: #2b3240"><strong>失敗</strong>　錠が左右に震えて止まり（約0.45秒）、少しして消える。入力中の柱も消える</figcaption>
+      <button type="button" class="kabi-replay" onClick="{{replayFail}}">失敗を再生</button>
+    </figure>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1920,"height":600}}'>
+class Component extends DCLogic {
+constructor(props) {
+super(props);
+this.state = { failOn: true, unlockMs: 0 };
+this.timers = [];
+}
+componentDidMount() {
+this.playUnlock();
+}
+componentWillUnmount() {
+this.timers.forEach((t) => clearTimeout(t));
+cancelAnimationFrame(this.raf);
+}
+// Same motion as the prototype: pop up, then swivel around the long leg as
+// a round rod (stroke width stays constant)
+shackleAt(ms) {
+let y = 0;
+if (ms > 0) {
+const p = Math.min(1, ms / 260);
+y = p < 0.6 ? -11 * (p / 0.6) : -11 + 2 * ((p - 0.6) / 0.4);
+}
+let ang = 0;
+if (ms > 260) {
+const q = Math.min(1, (ms - 260) / 540);
+const e = q < 0.5 ? 2 * q * q : 1 - Math.pow(-2 * q + 2, 2) / 2;
+ang = Math.PI * e;
+}
+const f = (v) => v.toFixed(2);
+const x1 = 42 - 20 * Math.cos(ang);
+const a = (42 - x1) / 2;
+const cx = (x1 + 42) / 2;
+const k = 0.5523;
+const d = 'M' + f(x1) + ' 26 V18 C' + f(x1) + ' ' + f(18 - 10 * k) + ' ' + f(cx - a * k) + ' 8 ' + f(cx) + ' 8 C' + f(cx + a * k) + ' 8 42 ' + f(18 - 10 * k) + ' 42 18 V40';
+return { d, y: f(y) };
+}
+playUnlock() {
+cancelAnimationFrame(this.raf);
+const t0 = performance.now();
+const step = () => {
+const ms = performance.now() - t0;
+this.setState({ unlockMs: ms });
+if (ms < 820) {
+this.raf = requestAnimationFrame(step);
+}
+};
+this.setState({ unlockMs: 0 });
+this.timers.push(setTimeout(() => { this.raf = requestAnimationFrame(step); }, 120));
+}
+// Drop the animation class for a moment so the browser restarts it
+replay(key) {
+this.setState({ [key]: false });
+this.timers.push(setTimeout(() => this.setState({ [key]: true }), 60));
+}
+renderVals() {
+const shackle = this.shackleAt(this.state.unlockMs);
+return {
+shackleD: shackle.d,
+shackleY: shackle.y,
+failClass: this.state.failOn ? 'kabi-shake' : '',
+replayUnlock: () => this.playUnlock(),
+replayFail: () => this.replay('failOn')
+};
+}
+}
+</script>
+</body>
+</html>

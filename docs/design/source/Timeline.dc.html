@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>kabi-lock ロック時の流れ</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&amp;family=Noto+Sans+JP:wght@400;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#3a4252}a:hover{color:#141820}
+</style>
+</helmet>
+<div style="width: 1920px; height: 520px; box-sizing: border-box; padding: 56px 64px; background: #f4f5f7; font-family: 'Inter', 'Noto Sans JP', sans-serif; color: #141820; display: flex; flex-direction: column; gap: 32px">
+  <div style="display: flex; align-items: baseline; gap: 20px">
+    <h1 style="margin: 0; font-size: 32px; font-weight: 700">ロック時の流れ</h1>
+    <p style="margin: 0; font-size: 18px; color: #4a5263">Meta+L → 黒 → ぼかした画面へフェードイン（{{fadeLabel}}）</p>
+  </div>
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 48px">
+    <figure style="margin: 0; display: flex; flex-direction: column; gap: 14px">
+      <div role="img" aria-label="ロック直後：画面は真っ黒" style="height: 300px; border-radius: 10px; background: #000000"></div>
+      <figcaption style="font-size: 17px; color: #2b3240"><strong style="font-variant-numeric: tabular-nums">0 ms</strong>　ロック直後。sway が全画面を黒で覆う</figcaption>
+    </figure>
+    <figure style="margin: 0; display: flex; flex-direction: column; gap: 14px">
+      <div role="img" aria-label="フェード途中：ぼかした画面と時計が半分の濃さで見える" style="height: 300px; border-radius: 10px; background: #000000; position: relative; overflow: hidden">
+        <div style="position: absolute; left: 0; top: 0; right: 0; bottom: 0; opacity: 0.5">
+          <div aria-hidden="true" style="position: absolute; left: -30px; top: -30px; right: -30px; bottom: -30px; filter: blur(14px); background: #0d0f13">
+            <div style="position: absolute; left: 60px; top: 70px; width: 270px; height: 180px; border-radius: 6px; background: #283244"></div>
+            <div style="position: absolute; left: 360px; top: 80px; width: 220px; height: 160px; border-radius: 6px; background: #1f3836"></div>
+            <div style="position: absolute; left: 80px; top: 280px; width: 480px; height: 70px; border-radius: 6px; background: #33291f"></div>
+          </div>
+          <div style="position: absolute; left: 0; top: 0; right: 0; bottom: 0; display: flex; align-items: center; flex-direction: column; justify-content: center; gap: 4px; color: #ffffff"><span style="font-size: 40px; font-weight: 500; line-height: 1; letter-spacing: -1px">10:30</span><span style="font-size: 9px">11/24</span></div>
+        </div>
+      </div>
+      <figcaption style="font-size: 17px; color: #2b3240"><strong style="font-variant-numeric: tabular-nums">{{midLabel}}</strong>　黒からぼかし画面と時計が一緒に浮かび上がる</figcaption>
+    </figure>
+    <figure style="margin: 0; display: flex; flex-direction: column; gap: 14px">
+      <div role="img" aria-label="ロック完了：ぼかした画面に時計" style="height: 300px; border-radius: 10px; background: #0d0f13; position: relative; overflow: hidden">
+        <div aria-hidden="true" style="position: absolute; left: -30px; top: -30px; right: -30px; bottom: -30px; filter: blur(14px)">
+          <div style="position: absolute; left: 60px; top: 70px; width: 270px; height: 180px; border-radius: 6px; background: #283244"></div>
+          <div style="position: absolute; left: 360px; top: 80px; width: 220px; height: 160px; border-radius: 6px; background: #1f3836"></div>
+          <div style="position: absolute; left: 80px; top: 280px; width: 480px; height: 70px; border-radius: 6px; background: #33291f"></div>
+        </div>
+        <div aria-hidden="true" style="position: absolute; left: 0; top: 0; right: 0; bottom: 0; background: radial-gradient(ellipse at center, rgba(0,0,0,0) 35%, rgba(0,0,0,0.6) 100%)"></div>
+        <div style="position: absolute; left: 0; top: 0; right: 0; bottom: 0; display: flex; align-items: center; flex-direction: column; justify-content: center; gap: 4px; color: rgba(255,255,255,0.94)"><span style="font-size: 40px; font-weight: 500; line-height: 1; letter-spacing: -1px">10:30</span><span style="font-size: 9px; color: rgba(255,255,255,0.74)">11/24</span></div>
+      </div>
+      <figcaption style="font-size: 17px; color: #2b3240"><strong style="font-variant-numeric: tabular-nums">{{endLabel}}</strong>　ロック完了。キー入力を待つ</figcaption>
+    </figure>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"fadeMs":{"editor":"int","default":1500,"min":100,"max":5000,"step":100,"unit":"ms"},"$preview":{"width":1920,"height":520}}'>
+class Component extends DCLogic {
+renderVals() {
+const ms = this.props.fadeMs ?? 1500;
+return {
+fadeLabel: (ms / 1000) + ' 秒',
+midLabel: Math.round(ms / 2) + ' ms',
+endLabel: ms + ' ms'
+};
+}
+}
+</script>
+</body>
+</html>
