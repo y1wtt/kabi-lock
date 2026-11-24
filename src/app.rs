@@ -651,6 +651,11 @@ impl App {
             AuthEvent::U2fSucceeded => log::info!("security key accepted"),
         }
         self.handle_event(Event::from(event));
+        // 震え・解除のアニメーションを次の Tick（最大 50ms 後）を待たずに始める（Plan 4）。
+        // ロックを外し終えた後は描かない（tick_overlay と同じ）
+        if self.exit.is_none() {
+            self.redraw_primary();
+        }
     }
 
     /// 状態機械にイベントを渡し、返ってきた操作を行う。
