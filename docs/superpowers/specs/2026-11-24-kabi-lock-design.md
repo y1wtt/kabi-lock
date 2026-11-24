@@ -195,6 +195,7 @@ primary = []
 fade_in_ms = 1500
 blur = 7                 # ぼかしの強さ（縮小後のガウスの σ 相当）
 date_format = "%m/%d"    # chrono の strftime 形式。曜日などは LC_TIME のロケールに従う
+font = "Inter"           # 時計・日付のフォント（fontconfig のファミリー名）
 
 [input]
 pillar_fade_ms = 900
@@ -215,7 +216,14 @@ unlock_after = true
 
 ### フォント
 
-- Inter（OFL）をバイナリに埋め込み、時計・日付に使う。ライセンス文を同梱する。
+- 時計・日付のフォントは `appearance.font`（fontconfig のファミリー名、初期値 `"Inter"`）で選べる。
+- 起動時に fontconfig で `font` を探し、時計用（太さ 500）と日付用（太さ 400）のフォントファイルを読み込む。
+- 次のどれかのときは、バイナリに埋め込んだ Inter（OFL、ライセンス文を同梱）を使う。
+  埋め込みは「何があっても文字を出す」ための予備として必ず持つ。
+  - `font` が見つからない
+  - フォントファイルが読めない（egui が扱えない形式を含む）
+  - fontconfig が使えない
+- 選んだフォントと、埋め込みに戻した場合はその理由をログ（英語）に出す。
 - `date_format` の結果に Inter にない文字（日本語など）が含まれる場合に備え、
   fontconfig で `sans-serif:lang=<LC_TIME の言語>` を引き、egui のフォールバックとして登録する。
   見つからなければ登録しない（その文字は表示されないが、ロックは続ける）。
