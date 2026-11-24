@@ -143,6 +143,8 @@ named by `auth.pam_service` does not exist, kabi-lock refuses to lock (exit code
 | `appearance.blur` | `7` | Blur strength: radius of a 5-pass box blur in screenshot pixels (clamped to 0.5-50; negative or NaN becomes 7) |
 | `appearance.date_format` | `"%m/%d"` | Date under the clock, chrono strftime format; names follow `LC_ALL`, then `LC_TIME`, then `LANG`. An invalid format falls back to the default |
 | `appearance.font` | `"Inter"` | Font family for the clock and date. Looked up with fontconfig (`fc-list`): the weight nearest 500 for the clock and 400 for the date. If the family is not found or unreadable, or fontconfig is missing or too slow (about 1 s), the built-in Inter is used |
+| `appearance.unlock_open_ms` | `800` | Unlock: time for the padlock to open, in ms. The blur starts clearing at `unlock_open_ms * 9/8` (900 with the default). 0 is instant; clamped to 5000 |
+| `appearance.unlock_reveal_ms` | `700` | Unlock: time for the blur to clear and the overlays to fade out, in ms; the lock is released when it ends (1600 ms after the unlock with the defaults). 0 is instant; clamped to 5000 |
 | `input.pillar_fade_ms` | `900` | Lifetime of one light pillar, in ms (clamped to 10000) |
 | `input.pillar_width` | `32` | Pillar width in px (1920x1080 layout; clamped to 1920) |
 | `input.band_width` | `768` | Input bar width in px (1920x1080 layout; clamped to 1920) |
