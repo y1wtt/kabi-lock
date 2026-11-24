@@ -117,8 +117,9 @@ until you unlock, so do not run it from `swayidle -w` for `before-sleep`: with `
 blocks until `kabi-lock` exits, and logind only delays the suspend for a short time
 (`InhibitDelayMaxSec`, 5 s by default), so the machine suspends anyway. Locking on suspend is not
 supported: without `-w` (`swayidle before-sleep kabi-lock`) swayidle does not wait, so the screen
-may not be locked yet when the machine sleeps. An idle timeout works that way, for example
-`swayidle timeout 300 kabi-lock`.
+may not be locked yet when the machine sleeps. An idle timeout works that way. To avoid starting a
+second instance while the screen is already locked, use
+`swayidle timeout 300 'pgrep -x kabi-lock || kabi-lock'`.
 
 ## Configuration
 
