@@ -33,6 +33,10 @@ pub struct Appearance {
     pub date_format: String,
     /// 時計・日付のフォント（fontconfig のファミリー名）。見つからなければ埋め込みの Inter。
     pub font: String,
+    /// 解除のとき錠が開き切るまで（跳ね上がり + 回転）。0 なら一瞬で開く。
+    pub unlock_open_ms: u32,
+    /// 解除のときぼかしが晴れ切るまで（重ね物が消えるのも同じ長さ）。0 なら一瞬で晴れる。
+    pub unlock_reveal_ms: u32,
 }
 
 impl Default for Appearance {
@@ -42,7 +46,42 @@ impl Default for Appearance {
             blur: 7.0,
             date_format: DEFAULT_DATE_FORMAT.into(),
             font: DEFAULT_FONT.into(),
+            unlock_open_ms: 800,
+            unlock_reveal_ms: 700,
         }
+    }
+}
+
+impl Appearance {
+    /// 解除のアニメーションの時間配分（錠・ぼかし・重ね物・ロックを外す時刻で共有する）。
+    pub fn unlock_timing(&self) -> crate::anim::UnlockTiming {
+        crate::anim::UnlockTiming {
+            open_ms: self.unlock_open_ms as f32,
+            reveal_ms: self.unlock_reveal_ms as f32,
+        }
+    }
+}
+
+/// `appearance.unlock_open_ms` と `appearance.unlock_reveal_ms` の上限。
+///
+/// 長すぎると、正しく解除してもロックが外れるまで長く待たされるので丸める。
+pub const MAX_UNLOCK_MS: u32 = 5_000;
+
+/// 解除のアニメーションの長さを上限で丸める。
+fn clamp_unlock_timing(appearance: &mut Appearance) {
+    if appearance.unlock_open_ms > MAX_UNLOCK_MS {
+        log::warn!(
+            "appearance.unlock_open_ms {} is too large; using {MAX_UNLOCK_MS}",
+            appearance.unlock_open_ms
+        );
+        appearance.unlock_open_ms = MAX_UNLOCK_MS;
+    }
+    if appearance.unlock_reveal_ms > MAX_UNLOCK_MS {
+        log::warn!(
+            "appearance.unlock_reveal_ms {} is too large; using {MAX_UNLOCK_MS}",
+            appearance.unlock_reveal_ms
+        );
+        appearance.unlock_reveal_ms = MAX_UNLOCK_MS;
     }
 }
 
@@ -197,6 +236,7 @@ pub fn parse(text: &str) -> Result<Loaded, ConfigError> {
         serde_ignored::deserialize(value, |path| unknown_keys.push(path.to_string()))
             .map_err(|e| ConfigError(e.to_string()))?;
     sanitize_date_format(&mut config.appearance);
+    clamp_unlock_timing(&mut config.appearance);
     clamp_input(&mut config.input);
     Ok(Loaded {
         config,
@@ -304,6 +344,8 @@ mod tests {
         assert_eq!(c.appearance.fade_in_ms, 1500);
         assert_eq!(c.appearance.blur, 7.0);
         assert_eq!(c.appearance.date_format, "%m/%d");
+        assert_eq!(c.appearance.unlock_open_ms, 800);
+        assert_eq!(c.appearance.unlock_reveal_ms, 700);
         assert_eq!(c.input.pillar_fade_ms, 900);
         assert_eq!(c.input.pillar_width, 32);
         assert_eq!(c.input.band_width, 768);
@@ -404,6 +446,53 @@ mod tests {
             .config
             .input;
         assert_eq!(input.pillar_fade_ms, 2500);
+    }
+
+    #[test]
+    fn unlock_timing_can_be_set() {
+        let text = "[appearance]\nunlock_open_ms = 400\nunlock_reveal_ms = 350";
+        let a = parse(text).unwrap().config.appearance;
+        assert_eq!((a.unlock_open_ms, a.unlock_reveal_ms), (400, 350));
+        assert_eq!(
+            a.unlock_timing(),
+            crate::anim::UnlockTiming {
+                open_ms: 400.0,
+                reveal_ms: 350.0,
+            }
+        );
+    }
+
+    #[test]
+    fn default_unlock_timing_matches_the_animation_default() {
+        assert_eq!(
+            Appearance::default().unlock_timing(),
+            crate::anim::UnlockTiming::default()
+        );
+    }
+
+    #[test]
+    fn zero_unlock_timing_is_allowed() {
+        let text = "[appearance]\nunlock_open_ms = 0\nunlock_reveal_ms = 0";
+        let a = parse(text).unwrap().config.appearance;
+        assert_eq!((a.unlock_open_ms, a.unlock_reveal_ms), (0, 0));
+    }
+
+    #[test]
+    fn huge_unlock_timing_is_clamped() {
+        let text = "[appearance]\nunlock_open_ms = 4294967295\nunlock_reveal_ms = 5001";
+        let a = parse(text).unwrap().config.appearance;
+        assert_eq!(a.unlock_open_ms, MAX_UNLOCK_MS);
+        assert_eq!(a.unlock_reveal_ms, MAX_UNLOCK_MS);
+        assert_eq!(MAX_UNLOCK_MS, 5_000);
+        // 上限ちょうどはそのまま
+        let text = "[appearance]\nunlock_open_ms = 5000\nunlock_reveal_ms = 5000";
+        let a = parse(text).unwrap().config.appearance;
+        assert_eq!((a.unlock_open_ms, a.unlock_reveal_ms), (5000, 5000));
+    }
+
+    #[test]
+    fn negative_unlock_timing_is_an_error() {
+        assert!(parse("[appearance]\nunlock_open_ms = -1").is_err());
     }
 
     #[test]
