@@ -3,9 +3,16 @@
 //! ぼかしはロック前に 1 回だけ作る（縮小 → 横のガウス → 縦のガウス、FBO で 3 パス）。
 //! 毎フレームの描画は、ぼかし済みと元画像の 2 枚を 1 回のパスで合成するだけ。
 
+use std::collections::HashMap;
+use std::time::Instant;
+
+use glow::HasContext;
+use log::{debug, warn};
 use wayland_client::protocol::wl_shm;
 
+use crate::render::egl::Gpu;
 use crate::state::Phase;
+use crate::wl::screencopy::Screenshot;
 
 // ---- 純粋な計算 ----
 
@@ -125,6 +132,433 @@ pub fn reveal_for(phase: Phase, now_ms: u64) -> f32 {
 /// 背景がまだ動いている（フレームコールバックで描き直す必要がある）か。
 pub fn needs_frames(fade: f32, phase: Phase) -> bool {
     fade < 1.0 || matches!(phase, Phase::Unlocking { .. })
+}
+
+// ---- GPU ----
+
+/// 画面全体を覆う 1 枚の三角形（頂点バッファなし）。`v_uv` は左下が (0, 0)。
+const VERTEX_SHADER: &str = r#"#version 300 es
+out vec2 v_uv;
+void main() {
+    vec2 pos = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    v_uv = pos;
+    gl_Position = vec4(pos * 2.0 - 1.0, 0.0, 1.0);
+}
+"#;
+
+/// 縮小: ミップマップの段 `u_lod` を読む（元画像を箱型に平均したもの）。
+const DOWNSCALE_SHADER: &str = r#"#version 300 es
+precision highp float;
+uniform sampler2D u_src;
+uniform float u_lod;
+in vec2 v_uv;
+out vec4 frag;
+void main() {
+    frag = vec4(textureLod(u_src, v_uv, u_lod).rgb, 1.0);
+}
+"#;
+
+/// 1 方向のガウス。`u_step` は 1 画素ぶんの uv（横なら (1/w, 0)）。
+const BLUR_SHADER: &str = r#"#version 300 es
+precision highp float;
+const int MAX_RADIUS = 64;
+uniform sampler2D u_src;
+uniform vec2 u_step;
+uniform int u_radius;
+uniform float u_weights[MAX_RADIUS + 1];
+in vec2 v_uv;
+out vec4 frag;
+void main() {
+    vec3 sum = texture(u_src, v_uv).rgb * u_weights[0];
+    for (int i = 1; i <= u_radius; ++i) {
+        vec2 offset = u_step * float(i);
+        sum += (texture(u_src, v_uv + offset).rgb + texture(u_src, v_uv - offset).rgb) * u_weights[i];
+    }
+    frag = vec4(sum, 1.0);
+}
+"#;
+
+/// 合成: ぼかし × ビネット × フェード（黒の上）→ 解除で元画像へ。
+const COMPOSITE_SHADER: &str = r#"#version 300 es
+precision highp float;
+uniform sampler2D u_blurred;
+uniform sampler2D u_sharp;
+uniform float u_fade;
+uniform float u_reveal;
+in vec2 v_uv;
+out vec4 frag;
+void main() {
+    // テクスチャは 1 行目（t = 0）が画面の上。画面の下端が v_uv.y = 0 なので上下を返す
+    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+    // swaylock-effects の --effect-vignette 0.5:0.5 と同じ式（中央 1.0、四辺 0.5）
+    float vignette = clamp(0.5 + 0.5 * 16.0 * uv.x * uv.y * (1.0 - uv.x) * (1.0 - uv.y), 0.0, 1.0);
+    vec3 blurred = texture(u_blurred, uv).rgb * vignette * u_fade;
+    vec3 sharp = texture(u_sharp, uv).rgb;
+    frag = vec4(mix(blurred, sharp, u_reveal), 1.0);
+}
+"#;
+
+/// 縮小ぼかしの 1 パス。`step` が `None` なら縮小、`Some` なら 1 方向のガウス（1 画素ぶんの uv）。
+struct Pass {
+    src: glow::Texture,
+    dst: glow::Texture,
+    step: Option<[f32; 2]>,
+}
+
+struct Textures {
+    /// 元画像（ミップマップ付き）。解除のときに使う。
+    sharp: glow::Texture,
+    /// 縮小してぼかしたもの。
+    blurred: glow::Texture,
+}
+
+pub struct Background {
+    vao: glow::VertexArray,
+    downscale: glow::Program,
+    blur: glow::Program,
+    composite: glow::Program,
+    /// 元画像の画素で測った σ。
+    sigma: f32,
+    textures: HashMap<String, Textures>,
+}
+
+impl Background {
+    /// シェーダーをコンパイルする。`gpu` は current であること（`Gpu::new` の直後はそうなっている）。
+    pub fn new(gpu: &Gpu, blur: f32) -> Result<Background, String> {
+        let gl = gpu.gl();
+        // SAFETY: current な GL コンテキストに対する、引数の正しい GL 呼び出しだけ。
+        unsafe {
+            let downscale = link(gl, DOWNSCALE_SHADER)?;
+            let blur_program = link(gl, BLUR_SHADER)?;
+            let composite = link(gl, COMPOSITE_SHADER)?;
+            let vao = gl.create_vertex_array()?;
+            let sigma = sigma_for_blur(blur);
+            debug!(
+                "background shaders ready (blur {} -> sigma {sigma:.2}px, downscale 1/{})",
+                clamp_blur(blur),
+                downscale_factor(sigma)
+            );
+            Ok(Background {
+                vao,
+                downscale,
+                blur: blur_program,
+                composite,
+                sigma,
+                textures: HashMap::new(),
+            })
+        }
+    }
+
+    /// スクリーンショットを GPU に送り、縮小ぼかしを作っておく。
+    ///
+    /// 扱えない形式や壊れた大きさなら警告して何もしない（その出力は黒）。
+    /// 終わったら framebuffer 0 を戻す。
+    pub fn upload(&mut self, gpu: &Gpu, shot: &Screenshot) {
+        let started = Instant::now();
+        let Some(layout) = texture_layout(shot.format) else {
+            warn!(
+                "screenshot of {}: unsupported format {:?}, using black",
+                shot.output_name, shot.format
+            );
+            return;
+        };
+        let (w, h, stride) = (shot.width, shot.height, shot.stride);
+        let needed = (stride as usize) * (h as usize).saturating_sub(1) + w as usize * 4;
+        if w == 0 || h == 0 || stride % 4 != 0 || stride < w * 4 || shot.pixels.len() < needed {
+            warn!(
+                "screenshot of {}: bad size {w}x{h} stride {stride}, using black",
+                shot.output_name
+            );
+            return;
+        }
+        let gl = gpu.gl();
+        // SAFETY: current な GL コンテキスト。画素の長さは上で確かめた。
+        let result = unsafe { self.make_textures(gl, shot, layout) };
+        match result {
+            Ok(textures) => {
+                if let Some(old) = self.textures.insert(shot.output_name.clone(), textures) {
+                    // SAFETY: もう参照しないテクスチャを消す
+                    unsafe {
+                        gl.delete_texture(old.sharp);
+                        gl.delete_texture(old.blurred);
+                    }
+                }
+                debug!(
+                    "background for {} ({w}x{h}) uploaded in {:?}",
+                    shot.output_name,
+                    started.elapsed()
+                );
+            }
+            Err(e) => warn!(
+                "background for {} failed, using black: {e}",
+                shot.output_name
+            ),
+        }
+    }
+
+    unsafe fn make_textures(
+        &self,
+        gl: &glow::Context,
+        shot: &Screenshot,
+        layout: TextureLayout,
+    ) -> Result<Textures, String> {
+        // SAFETY: current な GL コンテキストに対する GL 呼び出し。呼び出し側が引数の正しさを保証する。
+        unsafe {
+            let (w, h) = (shot.width as i32, shot.height as i32);
+
+            // 元画像。行の長さは stride から決める
+            let sharp = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(sharp));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+            gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, (shot.stride / 4) as i32);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                layout.internal_format as i32,
+                w,
+                h,
+                0,
+                layout.format,
+                layout.ty,
+                glow::PixelUnpackData::Slice(Some(&shot.pixels)),
+            );
+            gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+            if layout.swap_rb {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_SWIZZLE_R, glow::BLUE as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_SWIZZLE_B, glow::RED as i32);
+            }
+            set_sampling(gl, glow::LINEAR_MIPMAP_LINEAR);
+            gl.generate_mipmap(glow::TEXTURE_2D);
+
+            // 縮小用の 2 枚（a に縮小 → b に横 → a に縦）
+            let factor = downscale_factor(self.sigma);
+            let (dw, dh) = scaled_size(shot.width, shot.height, factor);
+            let a = target_texture(gl, dw, dh)?;
+            let b = target_texture(gl, dw, dh)?;
+            let fbo = gl.create_framebuffer()?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.viewport(0, 0, dw as i32, dh as i32);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_vertex_array(Some(self.vao));
+            gl.active_texture(glow::TEXTURE0);
+
+            let weights = kernel(self.sigma / factor as f32);
+            let mut padded = [0.0f32; MAX_RADIUS + 1];
+            padded[..weights.len()].copy_from_slice(&weights);
+            let radius = (weights.len() - 1) as i32;
+
+            let passes = [
+                Pass {
+                    src: sharp,
+                    dst: a,
+                    step: None,
+                },
+                Pass {
+                    src: a,
+                    dst: b,
+                    step: Some([1.0 / dw as f32, 0.0]),
+                },
+                Pass {
+                    src: b,
+                    dst: a,
+                    step: Some([0.0, 1.0 / dh as f32]),
+                },
+            ];
+            let mut status = Ok(());
+            for Pass { src, dst, step } in passes {
+                gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D,
+                    Some(dst),
+                    0,
+                );
+                if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                    status = Err("framebuffer incomplete".to_string());
+                    break;
+                }
+                gl.bind_texture(glow::TEXTURE_2D, Some(src));
+                match step {
+                    None => {
+                        gl.use_program(Some(self.downscale));
+                        uniform_i32(gl, self.downscale, "u_src", 0);
+                        uniform_f32(gl, self.downscale, "u_lod", (factor as f32).log2());
+                    }
+                    Some([sx, sy]) => {
+                        gl.use_program(Some(self.blur));
+                        uniform_i32(gl, self.blur, "u_src", 0);
+                        uniform_i32(gl, self.blur, "u_radius", radius);
+                        let step_loc = gl.get_uniform_location(self.blur, "u_step");
+                        gl.uniform_2_f32(step_loc.as_ref(), sx, sy);
+                        let weights_loc = gl.get_uniform_location(self.blur, "u_weights");
+                        gl.uniform_1_f32_slice(weights_loc.as_ref(), &padded);
+                    }
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            }
+
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.delete_framebuffer(fbo);
+            gl.delete_texture(b);
+            let error = gl.get_error();
+            if status.is_ok() && error != glow::NO_ERROR {
+                status = Err(format!("GL error 0x{error:x}"));
+            }
+            match status {
+                Ok(()) => Ok(Textures { sharp, blurred: a }),
+                Err(e) => {
+                    gl.delete_texture(sharp);
+                    gl.delete_texture(a);
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// 今 bind されている framebuffer（通常は出力の EGL サーフェス）に背景を描く。
+    ///
+    /// `fade` 0..1（黒→ぼかし）、`reveal` 0..1（ぼかし→くっきり）。スクショがない出力は黒。
+    /// `width` / `height` はバッファの画素数。
+    pub fn draw(
+        &self,
+        gpu: &Gpu,
+        output_name: &str,
+        width: u32,
+        height: u32,
+        fade: f32,
+        reveal: f32,
+    ) {
+        let gl = gpu.gl();
+        // SAFETY: current な GL コンテキストに対する、引数の正しい GL 呼び出しだけ。
+        unsafe {
+            gl.viewport(0, 0, width as i32, height as i32);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::SCISSOR_TEST);
+            let Some(textures) = self.textures.get(output_name) else {
+                gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                return;
+            };
+            gl.use_program(Some(self.composite));
+            gl.bind_vertex_array(Some(self.vao));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(textures.blurred));
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(textures.sharp));
+            gl.active_texture(glow::TEXTURE0);
+            uniform_i32(gl, self.composite, "u_blurred", 0);
+            uniform_i32(gl, self.composite, "u_sharp", 1);
+            uniform_f32(gl, self.composite, "u_fade", fade.clamp(0.0, 1.0));
+            uniform_f32(gl, self.composite, "u_reveal", reveal.clamp(0.0, 1.0));
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+        }
+    }
+}
+
+/// 頂点シェーダー（共通）と `fragment` をリンクする。
+unsafe fn link(gl: &glow::Context, fragment: &str) -> Result<glow::Program, String> {
+    // SAFETY: current な GL コンテキストに対する GL 呼び出し。呼び出し側が引数の正しさを保証する。
+    unsafe {
+        let program = gl.create_program()?;
+        let mut shaders = Vec::new();
+        for (kind, source) in [
+            (glow::VERTEX_SHADER, VERTEX_SHADER),
+            (glow::FRAGMENT_SHADER, fragment),
+        ] {
+            let shader = gl.create_shader(kind)?;
+            gl.shader_source(shader, source);
+            gl.compile_shader(shader);
+            if !gl.get_shader_compile_status(shader) {
+                let log = gl.get_shader_info_log(shader);
+                gl.delete_shader(shader);
+                gl.delete_program(program);
+                return Err(format!("shader compile failed: {log}"));
+            }
+            gl.attach_shader(program, shader);
+            shaders.push(shader);
+        }
+        gl.link_program(program);
+        for shader in shaders {
+            gl.detach_shader(program, shader);
+            gl.delete_shader(shader);
+        }
+        if !gl.get_program_link_status(program) {
+            let log = gl.get_program_info_log(program);
+            gl.delete_program(program);
+            return Err(format!("program link failed: {log}"));
+        }
+        Ok(program)
+    }
+}
+
+/// 縮小・ぼかしの描き込み先（RGBA8、ミップマップなし）。
+unsafe fn target_texture(
+    gl: &glow::Context,
+    width: u32,
+    height: u32,
+) -> Result<glow::Texture, String> {
+    // SAFETY: current な GL コンテキストに対する GL 呼び出し。呼び出し側が引数の正しさを保証する。
+    unsafe {
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            width as i32,
+            height as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        set_sampling(gl, glow::LINEAR);
+        Ok(texture)
+    }
+}
+
+/// bind 中のテクスチャの拡大縮小と端の扱い。
+unsafe fn set_sampling(gl: &glow::Context, min_filter: u32) {
+    // SAFETY: current な GL コンテキストに対する GL 呼び出し。呼び出し側が引数の正しさを保証する。
+    unsafe {
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            min_filter as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+    }
+}
+
+unsafe fn uniform_i32(gl: &glow::Context, program: glow::Program, name: &str, value: i32) {
+    // SAFETY: current な GL コンテキストに対する GL 呼び出し。呼び出し側が引数の正しさを保証する。
+    unsafe {
+        let location = gl.get_uniform_location(program, name);
+        gl.uniform_1_i32(location.as_ref(), value);
+    }
+}
+
+unsafe fn uniform_f32(gl: &glow::Context, program: glow::Program, name: &str, value: f32) {
+    // SAFETY: current な GL コンテキストに対する GL 呼び出し。呼び出し側が引数の正しさを保証する。
+    unsafe {
+        let location = gl.get_uniform_location(program, name);
+        gl.uniform_1_f32(location.as_ref(), value);
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +727,91 @@ mod tests {
         assert!(!needs_frames(1.0, Phase::Verifying));
         assert!(needs_frames(1.0, Phase::Unlocking { since_ms: 0 }));
         assert!(!needs_frames(1.0, Phase::Done));
+    }
+
+    /// 単色の画像を渡して、フェード・ビネット・ぼかし解除と赤青の入れ替えを確かめる。
+    /// 今のセッションの Wayland 接続で EGL を作る（ロックはしない）。`cargo test -- --ignored` で手動実行。
+    #[test]
+    #[ignore = "needs a running Wayland compositor and a GPU"]
+    fn draws_fade_vignette_and_reveal() {
+        let conn = wayland_client::Connection::connect_to_env().expect("wayland");
+        let gpu = Gpu::new(&conn).expect("gpu");
+        let mut bg = Background::new(&gpu, 7.0).expect("shaders");
+        let (w, h) = (64u32, 32u32);
+        // Xrgb8888 はメモリ上 B, G, R, X。赤 200・緑 20・青 10 の単色
+        let pixels = [10u8, 20, 200, 0].repeat((w * h) as usize);
+        bg.upload(
+            &gpu,
+            &Screenshot {
+                output_name: "TEST-1".into(),
+                width: w,
+                height: h,
+                stride: w * 4,
+                format: wl_shm::Format::Xrgb8888,
+                pixels,
+            },
+        );
+        let gl = gpu.gl();
+        let read = |name: &str, fade: f32, reveal: f32| -> Vec<u8> {
+            // SAFETY: current な GL コンテキストに対する GL 呼び出し。呼び出し側が引数の正しさを保証する。
+            unsafe {
+                let target = target_texture(gl, w, h).unwrap();
+                let fbo = gl.create_framebuffer().unwrap();
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D,
+                    Some(target),
+                    0,
+                );
+                bg.draw(&gpu, name, w, h, fade, reveal);
+                let mut out = vec![0u8; (w * h * 4) as usize];
+                gl.read_pixels(
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(&mut out)),
+                );
+                assert_eq!(gl.get_error(), glow::NO_ERROR);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.delete_framebuffer(fbo);
+                gl.delete_texture(target);
+                out
+            }
+        };
+        let at = |px: &[u8], x: u32, y: u32| -> [u8; 3] {
+            let i = ((y * w + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2]]
+        };
+        let near = |a: [u8; 3], b: [u8; 3]| {
+            a.iter()
+                .zip(b)
+                .all(|(x, y)| (*x as i32 - y as i32).abs() <= 3)
+        };
+
+        // フェード 0 は黒
+        assert_eq!(at(&read("TEST-1", 0.0, 0.0), 32, 16), [0, 0, 0]);
+        // フェード 1: 中央はそのままの色（RGB の順に直っている）、角はビネットで約半分
+        let full = read("TEST-1", 1.0, 0.0);
+        assert!(
+            near(at(&full, 32, 16), [200, 20, 10]),
+            "{:?}",
+            at(&full, 32, 16)
+        );
+        let corner = at(&full, 0, 0);
+        assert!(near(corner, [100, 10, 5]), "{corner:?}");
+        // 解除し切ると、フェードに関係なく元画像（ビネットなし）
+        let revealed = read("TEST-1", 0.3, 1.0);
+        assert!(
+            near(at(&revealed, 0, 0), [200, 20, 10]),
+            "{:?}",
+            at(&revealed, 0, 0)
+        );
+        // スクショのない出力は黒
+        assert_eq!(at(&read("NONE-1", 1.0, 1.0), 32, 16), [0, 0, 0]);
     }
 }
