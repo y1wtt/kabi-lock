@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
@@ -43,6 +44,10 @@ const NOTIFY_IFACE: &str = "org.freedesktop.Notifications";
 
 /// D-Bus の 1 回の呼び出しを待つ上限。KeePassXC が固まっていても終了処理が止まらないようにする。
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 解除後の `unlock_after` 全体を待つ上限。接続（SASL の認証）には時間切れがなく、呼び出しも
+/// 何回かあるので、全体で区切って kabi-lock の終了が止まらないようにする。
+const UNLOCK_DEADLINE: Duration = Duration::from_secs(10);
 
 /// ロック後の確認の間隔。
 pub const CHECK_INTERVAL: Duration = Duration::from_millis(200);
@@ -325,11 +330,43 @@ fn lock_and_watch() -> zbus::Result<()> {
     Ok(())
 }
 
-/// ロック中のコレクションがあれば Unlock → Prompt を呼ぶ。終了処理の中で呼ぶ（待ってよい）。
+/// ロック中のコレクションがあれば Unlock → Prompt を呼ぶ。終了処理の中で呼ぶ。
+///
+/// 別スレッドで行い、待つのは `UNLOCK_DEADLINE` まで。間に合わなければ警告を出して戻る
+/// （スレッドはプロセスの終了で一緒に終わる）。
 pub fn unlock_after() {
-    if let Err(e) = request_unlock() {
-        warn!("keepassxc: unlock request failed: {e}");
+    let work = || {
+        if let Err(e) = request_unlock() {
+            warn!("keepassxc: unlock request failed: {e}");
+        }
+    };
+    match run_with_deadline(UNLOCK_DEADLINE, work) {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!("keepassxc: unlock request did not finish within {UNLOCK_DEADLINE:?}; giving up")
+        }
+        Err(e) => warn!("keepassxc: could not start the unlock thread: {e}"),
     }
+}
+
+/// `work` を別スレッドで動かし、`deadline` まで終わるのを待つ。終われば `true`。
+///
+/// 間に合わなければ、スレッドは置いたまま `false` で戻る。`work` が panic しても終わったとみなす。
+fn run_with_deadline(
+    deadline: Duration,
+    work: impl FnOnce() + Send + 'static,
+) -> std::io::Result<bool> {
+    let (done_tx, done_rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("kabi-keepassxc".into())
+        .spawn(move || {
+            work();
+            let _ = done_tx.send(());
+        })?;
+    Ok(!matches!(
+        done_rx.recv_timeout(deadline),
+        Err(RecvTimeoutError::Timeout)
+    ))
 }
 
 fn request_unlock() -> zbus::Result<()> {
@@ -523,6 +560,29 @@ mod tests {
         assert_eq!(header.interface().unwrap().as_str(), KEEPASSXC_IFACE);
         // 確かめた一意名に送る（よく知られた名前だと、その間に持ち主が変わると自動起動しうる）
         assert_eq!(header.destination().unwrap().to_string(), ":1.10");
+    }
+
+    #[test]
+    fn work_that_finishes_in_time_is_waited_for() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let finished = run_with_deadline(Duration::from_secs(5), move || {
+            tx.send(()).unwrap();
+        })
+        .unwrap();
+        assert!(finished);
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn work_past_the_deadline_is_left_behind() {
+        let started = std::time::Instant::now();
+        let finished = run_with_deadline(Duration::from_millis(50), || {
+            thread::sleep(Duration::from_secs(30));
+        })
+        .unwrap();
+        assert!(!finished);
+        // 30 秒の作業を待たずに戻る（負荷の高いビルド機でも揺れないよう上限は広め）
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
