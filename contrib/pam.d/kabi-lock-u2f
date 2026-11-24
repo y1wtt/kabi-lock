@@ -14,18 +14,21 @@
 # every failed try would be counted, the failures pile up every second, and
 # your account can end up locked.
 #
-# Never add `nouserok` to the pam_u2f line. With a missing authfile (or a user
-# with no entry) pam_u2f would then succeed without a key touch, and anyone
+# Never add `nouserok` or `alwaysok` to the pam_u2f line. `nouserok` makes
+# pam_u2f succeed without a key touch when the authfile is missing or the user
+# has no entry, and `alwaysok` makes it succeed every time: either way anyone
 # could unlock the screen.
 #
 # Do not enable `pinverification` or `interactive`, and do not include a
 # password stack. If this service ever prompts for input (password, PIN,
-# "press ENTER"), kabi-lock refuses to answer, gives up on security-key unlock
-# for that lock (the process exits with status 3 instead of retrying, to avoid
-# faillock) and you have to unlock with your password.
+# "press ENTER"), kabi-lock refuses to answer. The U2F helper exits with
+# status 3, kabi-lock stops retrying security-key unlock for this lock (to
+# avoid faillock), and the password still works.
 #
 # Touching a registered key unlocks the screen with no password and no PIN,
-# so PIN-protected keys (pinverification=1) cannot be used here.
+# so PIN-protected keys (pinverification=1) cannot be used here. Register
+# the key with plain `pamu2fcfg` (no `-N` or `-V`): otherwise pam_u2f asks
+# for a PIN and touch unlock turns off.
 #
 # authfile: one of
 #   /etc/u2f_mappings                    system-wide, one "user:keyhandle,..." line per user
