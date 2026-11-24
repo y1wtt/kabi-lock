@@ -379,6 +379,8 @@ impl SessionLockHandler for App {
 
     fn finished(&mut self, _: &Connection, _: &QueueHandle<Self>, session_lock: SessionLock) {
         let error = if session_lock.is_locked() {
+            // locked の後に destroy を送るとプロトコルエラーになるので、unlock_and_destroy で閉じる
+            session_lock.unlock();
             AppError::Other("the compositor ended the lock".into())
         } else {
             AppError::LockDenied
