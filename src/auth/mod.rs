@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod password;
+pub mod u2f;
 
 use std::path::Path;
 
