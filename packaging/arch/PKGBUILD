@@ -1,0 +1,73 @@
+# Maintainer: yuga iwata <30215831+y1wtt@users.noreply.github.com>
+# Builds the latest kabi-lock from the GitHub repository.
+
+_pkgname=kabi-lock
+pkgname=kabi-lock-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc="Screen locker for sway: blurred screenshot background, fade-in, PAM and YubiKey unlock"
+arch=('x86_64' 'aarch64')
+url="https://github.com/y1wtt/kabi-lock"
+license=('BSD-3-Clause')
+depends=('fontconfig' 'gcc-libs' 'glibc' 'libglvnd' 'libxkbcommon' 'pam' 'wayland')
+makedepends=('cargo' 'clang' 'git')
+optdepends=('keepassxc: lock and unlock KeePassXC databases around the screen lock'
+            'mesa: GPU drivers for the EGL/OpenGL ES rendering (or a proprietary driver)'
+            'pam-u2f: unlock with a YubiKey touch')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+backup=('etc/pam.d/kabi-lock')
+options=('!lto')
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+	cd "$_pkgname"
+	if git describe --long --tags --match 'v[0-9]*' >/dev/null 2>&1; then
+		git describe --long --tags --match 'v[0-9]*' | sed 's/^v//; s/\([^-]*-g\)/r\1/; s/-/./g'
+	else
+		printf 'r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+	fi
+}
+
+prepare() {
+	cd "$_pkgname"
+	export RUSTUP_TOOLCHAIN=stable
+	cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+	cd "$_pkgname"
+	export RUSTUP_TOOLCHAIN=stable
+	export CARGO_TARGET_DIR=target
+	cargo build --frozen --release
+}
+
+check() {
+	cd "$_pkgname"
+	export RUSTUP_TOOLCHAIN=stable
+	export CARGO_TARGET_DIR=target
+	cargo test --frozen --release
+}
+
+package() {
+	cd "$_pkgname"
+
+	install -Dm755 target/release/kabi-lock "$pkgdir/usr/bin/kabi-lock"
+
+	# PAM service for the password check (kept across upgrades, see backup=)
+	install -Dm644 packaging/pam.d/kabi-lock "$pkgdir/etc/pam.d/kabi-lock"
+
+	# kabi-lock is BSD-3-Clause; the embedded Inter font is SIL OFL 1.1
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm644 assets/fonts/LICENSE.txt "$pkgdir/usr/share/licenses/$pkgname/LICENSE-Inter-OFL.txt"
+
+	install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
+	install -Dm644 docs/design/images/lock-screen.png \
+		"$pkgdir/usr/share/doc/$_pkgname/docs/design/images/lock-screen.png"
+
+	# examples: copy what you need; none of these are active
+	install -Dm644 docs/config.example.toml "$pkgdir/usr/share/$_pkgname/config.example.toml"
+	install -Dm644 contrib/pam.d/kabi-lock-u2f "$pkgdir/usr/share/$_pkgname/pam.d/kabi-lock-u2f"
+	install -Dm644 contrib/sway/kabi-lock.conf "$pkgdir/usr/share/$_pkgname/sway/kabi-lock.conf"
+}
