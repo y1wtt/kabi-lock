@@ -294,6 +294,19 @@ Plan 2 → 3 → 4 → 5 の順に全タスクを適用し、ビルド・テス�
   `Ok` を返した後に呼ぶ。KeePassXC の確認と解除要求は、Secret Service の持ち主が KeePassXC のときだけ行う。
 - Plan 6: `/etc/pam.d/kabi-lock` は `auth include login` と `account include login`。
   PKGBUILD の `makedepends` に `clang`（`pam-sys` の bindgen）。
+- Plan 2〜5 の手動確認: `/etc/pam.d/kabi-lock` は Plan 6 まで入らないので、9 章の手順で解除するときは
+  `XDG_CONFIG_HOME` の一時的な設定に `[auth]` `pam_service = "login"` を書いて使う（`/etc/pam.d/login` に
+  `auth` と `account` の行があることを先に確かめる。`/etc/pam.d/swaylock` は `account` の行がないので使えない）。
+  間違ったパスワードを PAM に送るのは、Plan 2〜6 の手動確認全体で Plan 4 Task 15 Step 4 の 1 回だけ。
+- Plan 4: 重ね物の準備（`OverlayHost::attach_gpu` が行う、フォントの読み込みと検査、egui_glow のシェーダー、
+  数字と日付の字形のアトラスの転送）は、`prepare_background` が撮影スレッドを join して `Gpu` を返した後、
+  ロック要求の前に行う。設計書 5 章 2 の「撮影と並行して準備する」とは違い、撮影とは並行しない
+  （GL のコンテキストを持つ `Gpu` が、撮影の join と同じ `prepare_background` から返るため）。
+  そのぶんロック要求が Plan 3 の時点より約 30ms 遅くなる。ロック前に済ませることは変わらない。
+- Plan 5: Plan 2 が `App` に置いた `user` は、U2F の helper がユーザー名を自分で取るので読まれず、Plan 5 Task 6 で外した。
+- Plan 6: 上の「コードの変更はしない」の例外として、`src/config.rs` のテストモジュールにテストを 1 つ
+  （`example_config_matches_defaults_and_lists_every_key`。`docs/config.example.toml` が初期値と一致し、
+  全キーを含むことを確かめる）足す。製品のコードは変えない。
 
 ## 5. 時間と単位
 
