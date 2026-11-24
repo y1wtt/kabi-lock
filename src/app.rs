@@ -377,7 +377,8 @@ impl App {
         );
         let phase = self.machine.phase();
         let reveal = background::reveal_for(phase, now);
-        let animating = background::needs_frames(fade, phase);
+        let animating = background::needs_frames(fade, phase)
+            || self.overlay.animating(index, &self.machine, now);
         let Some(out) = self.outputs.get_mut(index) else {
             return;
         };
@@ -448,6 +449,16 @@ impl App {
         }
     }
 
+    /// 主画面を描き直す。フレームコールバック待ちなら、そのコールバックで描かれるので何もしない。
+    pub(crate) fn redraw_primary(&mut self) {
+        if let Some(index) = self.primary_index()
+            && index < self.outputs.len()
+            && !self.outputs[index].frame_pending
+        {
+            self.draw_output(index);
+        }
+    }
+
     /// wl_surface から出力の番号を引く。
     fn output_index_of(&self, surface: &wl_surface::WlSurface) -> Option<usize> {
         self.outputs
@@ -492,18 +503,19 @@ impl App {
         background::needs_frames(fade, self.machine.phase())
     }
 
-    /// フレームコールバック待ちでない GPU の出力のうち、アニメーション中のものと、
-    /// まだ最終の絵を出していないものを描き直す。
+    /// フレームコールバック待ちでない GPU の出力のうち、アニメーション中のもの（背景、または
+    /// 主画面の重ね物が動いている）と、まだ最終の絵を出していないものを描き直す。
     fn kick_animation(&mut self) {
         // release_lock の後は描かない
         if self.exit.is_some() {
             return;
         }
         let animating = self.background_animating();
+        let now = self.clock.now_ms();
         for index in 0..self.outputs.len() {
             let out = &self.outputs[index];
             if !out.frame_pending
-                && (animating || !out.settled)
+                && (animating || !out.settled || self.overlay.animating(index, &self.machine, now))
                 && matches!(out.render, Some(OutputRender::Gpu(_)))
             {
                 self.draw_output(index);
@@ -561,10 +573,15 @@ impl App {
             KeyAction::Submit => {
                 let empty = self.password.is_empty();
                 self.handle_event(Event::Submit { empty });
+                // 確認中になったらすぐ錠を出す（Plan 4）
+                self.redraw_primary();
             }
             KeyAction::Backspace => {
-                if self.machine.accepts_input() {
-                    self.password.backspace();
+                if self.machine.accepts_input() && self.password.backspace() {
+                    // 1 文字消えたときだけ光の柱を出す（Plan 4）
+                    let now_ms = self.clock.now_ms();
+                    self.overlay.keystroke(now_ms);
+                    self.redraw_primary();
                 }
             }
             KeyAction::Clear => {
@@ -575,9 +592,12 @@ impl App {
             KeyAction::Insert => {
                 if self.machine.accepts_input()
                     && let Some(text) = &text
+                    && self.password.push_str(text)
                 {
-                    // 入りきらない分は捨てる（Plan 4 は true のときだけ光の柱を出す）
-                    self.password.push_str(text);
+                    // パスワードに入ったときだけ光の柱を出す（Plan 4。入りきらない分は捨て、柱も出さない）
+                    let now_ms = self.clock.now_ms();
+                    self.overlay.keystroke(now_ms);
+                    self.redraw_primary();
                 }
             }
             KeyAction::Ignore => {}
@@ -870,9 +890,15 @@ impl CompositorHandler for App {
         if self.exit.is_some() {
             return;
         }
-        // フェード中・解除中は次のフレームを描く（時刻は Clock だけを使い、引数の時刻は使わない）。
+        // フェード中・解除中・主画面の重ね物が動いている間は次のフレームを描く
+        // （時刻は Clock だけを使い、引数の時刻は使わない）。
         // 最終の絵をまだ出していなければ（フェードの途中で画面が眠っていたなど）それも描く
-        if self.background_animating() || !self.outputs[index].settled {
+        if self.background_animating()
+            || self
+                .overlay
+                .animating(index, &self.machine, self.clock.now_ms())
+            || !self.outputs[index].settled
+        {
             self.draw_output(index);
         }
     }
