@@ -2,9 +2,12 @@
 
 #![forbid(unsafe_code)]
 
+use crate::anim::UnlockTiming;
+
 /// 失敗してから錠が消えて入力待ちに戻るまで。
 pub const FAIL_HOLD_MS: u64 = 1200;
-/// 解除開始からロックを外すまで（錠が開く → ぼかしが晴れる）。
+/// 初期値の解除の時間配分で、解除開始からロックを外すまで（錠が開く → ぼかしが晴れる）。
+/// 設定で変えたときは `UnlockTiming::total_ms` を使う。
 pub const UNLOCK_TOTAL_MS: u64 = 1600;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,11 +60,26 @@ pub enum Action {
 
 pub struct Machine {
     phase: Phase,
+    /// 解除の時間配分。ロックを外す時刻と、錠・ぼかし・重ね物の動きはすべてこれに従う。
+    unlock: UnlockTiming,
 }
 
 impl Machine {
+    /// 初期値の解除の時間配分で作る。
     pub fn new() -> Self {
-        Self { phase: Phase::Idle }
+        Self::with_unlock_timing(UnlockTiming::default())
+    }
+
+    /// 解除の時間配分を指定して作る（設定の `appearance.unlock_*_ms`）。
+    pub fn with_unlock_timing(unlock: UnlockTiming) -> Self {
+        Self {
+            phase: Phase::Idle,
+            unlock,
+        }
+    }
+
+    pub fn unlock_timing(&self) -> UnlockTiming {
+        self.unlock
     }
 
     pub fn phase(&self) -> Phase {
@@ -85,7 +103,7 @@ impl Machine {
         match (self.phase, event) {
             (Phase::Done, _) => None,
             (Phase::Unlocking { since_ms }, Event::Tick)
-                if now_ms.saturating_sub(since_ms) >= UNLOCK_TOTAL_MS =>
+                if now_ms.saturating_sub(since_ms) >= self.unlock.total_ms() =>
             {
                 self.phase = Phase::Done;
                 Some(Action::ReleaseLock)
@@ -207,6 +225,37 @@ mod tests {
     }
 
     #[test]
+    fn new_machine_uses_the_default_unlock_timing() {
+        assert_eq!(Machine::new().unlock_timing(), UnlockTiming::default());
+    }
+
+    #[test]
+    fn faster_unlock_timing_releases_at_its_total() {
+        let timing = UnlockTiming {
+            open_ms: 400.0,
+            reveal_ms: 300.0,
+        };
+        let mut m = Machine::with_unlock_timing(timing);
+        assert_eq!(m.unlock_timing(), timing);
+        m.handle(Event::U2fSucceeded, 100);
+        // 450 + 300 = 750ms で外す
+        assert_eq!(m.handle(Event::Tick, 100 + 749), None);
+        assert_eq!(m.handle(Event::Tick, 100 + 750), Some(Action::ReleaseLock));
+        assert_eq!(m.phase(), Phase::Done);
+    }
+
+    #[test]
+    fn zero_unlock_timing_releases_on_the_next_tick() {
+        let mut m = Machine::with_unlock_timing(UnlockTiming {
+            open_ms: 0.0,
+            reveal_ms: 0.0,
+        });
+        m.handle(Event::U2fSucceeded, 100);
+        assert_eq!(m.phase(), Phase::Unlocking { since_ms: 100 });
+        assert_eq!(m.handle(Event::Tick, 100), Some(Action::ReleaseLock));
+    }
+
+    #[test]
     fn u2f_unlocks_from_idle_failed_and_verifying() {
         for setup in [0, 1, 2] {
             let mut m = Machine::new();
@@ -261,9 +310,6 @@ mod tests {
 
     #[test]
     fn unlock_length_matches_the_animation() {
-        assert_eq!(
-            UNLOCK_TOTAL_MS as f32,
-            crate::anim::REVEAL_START_MS + crate::anim::REVEAL_MS
-        );
+        assert_eq!(UNLOCK_TOTAL_MS, UnlockTiming::default().total_ms());
     }
 }
