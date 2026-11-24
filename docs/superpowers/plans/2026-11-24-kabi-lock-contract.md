@@ -244,9 +244,18 @@ Plan 6 は `docs/config.example.toml` とその一致テスト、README の設�
 
 ```rust
 // src/auth/u2f.rs
-/// pam_u2f の PAM サービスで、成功するまでタッチ待ちを繰り返すスレッドを起動する。
-/// 成功したら AuthEvent::U2fSucceeded を 1 回送って終わる。失敗したら 1 秒あけて再試行。
-pub fn spawn(service: String, user: String, events: calloop::channel::Sender<AuthEvent>);
+/// 子プロセス `kabi-lock --u2f-helper <service>`（/proc/self/exe）でタッチ待ちを 1 回ずつ行い、
+/// 監視スレッドで終了を待つ。成功したら AuthEvent::U2fSucceeded を 1 回送って終わる。
+/// 失敗したら 1 秒あけて子を起動し直す。PAM サービスのファイルがなければ None。
+pub fn spawn(service: String, events: calloop::channel::Sender<AuthEvent>) -> Option<U2fHandle>;
+pub struct U2fHandle { /* 監視スレッドと現在の子プロセス */ }
+impl U2fHandle {
+    /// 子プロセスを止め（SIGTERM → 0.5 秒後に SIGKILL）、監視スレッドを終わらせる。Drop でも呼ぶ。
+    pub fn stop(&mut self);
+}
+pub const HELPER_ARG: &str;                       // "--u2f-helper"
+/// main.rs から呼ぶ子プロセス側の処理。終了コード: 0 成功、1 拒否、3 入力を求められた、4 準備失敗。
+pub fn helper_main(service: &str) -> u8;
 
 // src/auth/keepassxc.rs
 /// lockAllDatabases を呼び、別スレッドで最大 2 秒 Secret Service の Locked を確かめる。
@@ -260,9 +269,31 @@ pub fn unlock_after();
 
 ### Plan 6 が作るもの
 
-`packaging/pam.d/kabi-lock`（`auth include login`）、`contrib/pam.d/kabi-lock-u2f`（例）、
+`packaging/pam.d/kabi-lock`（`auth include login` と `account include login`）、`contrib/pam.d/kabi-lock-u2f`（例）、
 `packaging/arch/PKGBUILD`、`README.md`、`contrib/sway/kabi-lock.conf`（`bindsym $mod+l exec kabi-lock` の例）、
 `docs/config.example.toml`。コードの変更はしない（必要ならバグとして報告する）。
+
+### 計画を書いた後に確定した差分
+
+Plan 2〜5 は、前の計画を実際に当てたコードの上に順に当てて確かめた（作業用のリポジトリで
+Plan 2 → 3 → 4 → 5 の順に全タスクを適用し、ビルド・テスト・clippy・rustfmt と入れ子の sway での描画を確認）。
+その過程で、上の契約から次のように変わった。各計画書の記述が正しい。
+
+- Plan 2: `LockOutput` の先頭に `output: WlOutput` を追加。`ShmBlack::new()` と `Default`。
+  `App` のフィールド名は Plan 2 の計画書のとおり（`output_state`、`seat_state`、`outputs`、`machine`、
+  `checker`、`clock`、`first_configure_ms` など）。`classify` は制御文字を 1 つでも含む文字列を無視する。
+  ユーザー名は `nix` の passwd 検索、なければ `$USER`。キーリピートはしない。
+- Plan 3: `LockOutput` の `render` を `lock_surface` より前に移し（EGL サーフェスを先に破棄するため）、
+  `scale` を追加。`App` に `gpu`、`background`。フェードは Plan 2 の `first_configure_ms` から測る（`fade_for`）。
+  フレームコールバックは SCTK 0.21 の `FrameCallbackData` を使う。`blur` は swaylock-effects の
+  `--effect-blur Nx5` に合わせた 5 回のボックスぼかしの半径として扱う（7 で σ 約 9.7px）。
+- Plan 4: `src/fonts.rs`（純粋、`fc-list` の出力の解釈と太さの選択）を追加。依存に `skrifa` 0.44 と
+  chrono の `unstable-locales`。フォントは選んだファミリーの中で近い太さ（CSS Fonts 4 の順）を使い、
+  ファミリーがない・読めない・fontconfig がないときは埋め込みの Inter。`wl/outputs.rs` に `focused_output()`。
+- Plan 5: U2F を子プロセスにした（上の `u2f` の API）。`unlock_after` は `main.rs` で `app::run` が
+  `Ok` を返した後に呼ぶ。KeePassXC の確認と解除要求は、Secret Service の持ち主が KeePassXC のときだけ行う。
+- Plan 6: `/etc/pam.d/kabi-lock` は `auth include login` と `account include login`。
+  PKGBUILD の `makedepends` に `clang`（`pam-sys` の bindgen）。
 
 ## 5. 時間と単位
 
