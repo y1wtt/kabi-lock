@@ -5,10 +5,9 @@ It fades from black into a blurred screenshot of your desktop, shows a clock, an
 light pillar for every key you type. You can unlock with your password or by touching a
 YubiKey.
 
-![kabi-lock screen](docs/design/images/lock-screen.png)
+![Locking and unlocking with kabi-lock](docs/images/lock-unlock.gif)
 
-*Design render of the lock screen. The desktop behind it is drawn as blurred rectangles
-instead of a real screenshot.*
+*Locking and then unlocking on sway.*
 
 日本語の説明は[下](#日本語)にあります。
 
