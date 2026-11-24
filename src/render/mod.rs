@@ -1,5 +1,7 @@
 //! 描画。出力ごとの描画手段を `OutputRender` で持つ。
 
+pub mod background;
+pub mod egl;
 pub mod shm;
 
 /// 出力 1 つの描画手段。
