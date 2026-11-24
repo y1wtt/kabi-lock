@@ -3,6 +3,7 @@
 use std::process::ExitCode;
 
 use kabi_lock::app::{self, AppError};
+use kabi_lock::auth::u2f;
 
 /// 引数が不正なときの終了コード。
 const USAGE_ERROR: u8 = 2;
@@ -21,6 +22,8 @@ enum Command {
     Run,
     Version,
     Help,
+    /// 隠しモード: YubiKey のタッチ待ちを 1 回だけ行う子プロセス（Plan 5）。
+    U2fHelper(String),
 }
 
 /// プログラム名を除いた引数を読む。知らない引数や 2 つ以上の引数はエラー。
@@ -30,6 +33,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
         None => Command::Run,
         Some("--version" | "-V") => Command::Version,
         Some("--help" | "-h") => Command::Help,
+        Some(arg) if arg == u2f::HELPER_ARG => match args.next() {
+            Some(service) => Command::U2fHelper(service),
+            None => return Err(format!("missing PAM service after {arg}")),
+        },
         Some(other) => return Err(format!("unknown argument: {other}")),
     };
     if args.next().is_some() {
@@ -73,6 +80,11 @@ fn main() -> ExitCode {
             }
             ExitCode::from(exit_code(&result))
         }
+        Command::U2fHelper(service) => {
+            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+                .init();
+            ExitCode::from(u2f::helper_main(&service))
+        }
     }
 }
 
@@ -107,6 +119,27 @@ mod tests {
             parse(&["--version", "--help"]),
             Err("too many arguments".to_string())
         );
+    }
+
+    #[test]
+    fn hidden_u2f_helper_mode() {
+        assert_eq!(
+            parse(&["--u2f-helper", "u2f-touch"]),
+            Ok(Command::U2fHelper("u2f-touch".to_string()))
+        );
+        assert_eq!(
+            parse(&["--u2f-helper"]),
+            Err("missing PAM service after --u2f-helper".to_string())
+        );
+        assert_eq!(
+            parse(&["--u2f-helper", "u2f-touch", "extra"]),
+            Err("too many arguments".to_string())
+        );
+    }
+
+    #[test]
+    fn helper_mode_is_not_in_the_usage() {
+        assert!(!USAGE.contains(u2f::HELPER_ARG));
     }
 
     #[test]
