@@ -45,6 +45,27 @@ impl OutputMeta {
     }
 }
 
+/// ロック前に sway でフォーカスしていた出力の名前（sway IPC の `get_outputs` の `focused`）。
+///
+/// sway でない・`SWAYSOCK` がない・応答が不正なときは `None`（主画面は設定か最初の出力で決める）。
+/// ロックの後はフォーカスの意味が変わるので、ロック前に 1 回だけ呼ぶ。
+pub fn focused_output() -> Option<String> {
+    let mut conn = match swayipc::Connection::new() {
+        Ok(conn) => conn,
+        Err(e) => {
+            log::debug!("sway IPC unavailable: {e}");
+            return None;
+        }
+    };
+    match conn.get_outputs() {
+        Ok(outputs) => outputs.into_iter().find(|o| o.focused).map(|o| o.name),
+        Err(e) => {
+            log::debug!("sway IPC get_outputs failed: {e}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
