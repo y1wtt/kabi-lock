@@ -729,6 +729,13 @@ mod tests {
         assert!(!needs_frames(1.0, Phase::Done));
     }
 
+    #[test]
+    fn blur_shader_max_radius_matches_rust() {
+        // u_weights の長さ（MAX_RADIUS + 1）がずれると、半径の大きいぼかしで重みが欠ける
+        let declaration = format!("const int MAX_RADIUS = {MAX_RADIUS};");
+        assert!(BLUR_SHADER.contains(&declaration), "{declaration}");
+    }
+
     /// 単色の画像を渡して、フェード・ビネット・ぼかし解除と赤青の入れ替えを確かめる。
     /// 今のセッションの Wayland 接続で EGL を作る（ロックはしない）。`cargo test -- --ignored` で手動実行。
     #[test]
