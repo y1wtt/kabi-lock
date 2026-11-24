@@ -136,6 +136,40 @@ pub struct App {
     pub(crate) exit: Option<Result<(), AppError>>,
 }
 
+/// スクリーンショット（別スレッド）と EGL の準備を並行して進め、背景を作る。
+///
+/// EGL かシェーダーが使えなければ `(None, None)` で、全出力を shm の黒で描く。
+/// 撮れなかった出力は `Background` にテクスチャがないので黒になる。
+fn prepare_background(conn: &Connection, blur: f32) -> (Option<Gpu>, Option<Background>) {
+    let capture = crate::wl::screencopy::spawn_capture_all();
+    let gpu = match Gpu::new(conn) {
+        Ok(gpu) => Some(gpu),
+        Err(e) => {
+            log::warn!("EGL unavailable, falling back to a black shm background: {e}");
+            None
+        }
+    };
+    let shots = capture.join().unwrap_or_else(|_| {
+        log::warn!("screenshot thread panicked, background will be black");
+        Vec::new()
+    });
+    let Some(gpu) = gpu else {
+        return (None, None);
+    };
+    match Background::new(&gpu, blur) {
+        Ok(mut background) => {
+            for shot in &shots {
+                background.upload(&gpu, shot);
+            }
+            (Some(gpu), Some(background))
+        }
+        Err(e) => {
+            log::warn!("background shaders failed, falling back to shm: {e}");
+            (None, None)
+        }
+    }
+}
+
 /// ロックして、解除されるまでイベントループを回す。
 ///
 /// ext-session-lock が使えない／拒否されたら `Err`。
@@ -214,6 +248,10 @@ pub fn run(config: Config) -> Result<(), AppError> {
         let meta = OutputMeta::from_info(app.output_state.info(&output).as_ref());
         log::info!("output {}: {}", meta.label(), meta.description);
     }
+    // 背景を用意してからロックする（撮影と EGL の準備は並行。ロックした後は撮れない）
+    let (gpu, background) = prepare_background(&conn, app.config.appearance.blur);
+    app.gpu = gpu;
+    app.background = background;
     WaylandSource::new(conn, queue)
         .insert(handle)
         .map_err(|e| AppError::Other(format!("wayland source: {}", e.error)))?;
