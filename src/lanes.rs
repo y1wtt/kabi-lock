@@ -1,5 +1,7 @@
 //! 光の柱のレーン。
 
+#![forbid(unsafe_code)]
+
 /// 柱どうしのすき間（px）。
 pub const GAP: u32 = 16;
 

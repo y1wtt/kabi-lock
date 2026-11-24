@@ -1,5 +1,7 @@
 //! 設定ファイルの読み込みと、主画面の選択。
 
+#![forbid(unsafe_code)]
+
 use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;

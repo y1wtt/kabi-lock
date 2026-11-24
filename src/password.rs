@@ -1,5 +1,7 @@
 //! パスワードの入力バッファ。
 
+#![forbid(unsafe_code)]
+
 use zeroize::{Zeroize, Zeroizing};
 
 /// 受け付けるパスワードの最大長（UTF-8 のバイト数）。
