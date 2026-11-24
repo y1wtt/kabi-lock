@@ -7,6 +7,7 @@ license = "BSD-3-Clause"
 repository = "https://github.com/y1wtt/kabi-lock"
 
 [dependencies]
+chrono = { version = "0.4.45", features = ["unstable-locales"] }
 env_logger = "0.11.12"
 fastrand = "2.5.0"
 glow = "0.17"
