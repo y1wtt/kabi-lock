@@ -1,5 +1,7 @@
 # kabi-lock
 
+English | [日本語](README.ja.md)
+
 A screen locker for [sway](https://swaywm.org/), written in Rust.
 It fades from black into a blurred screenshot of your desktop, shows a clock, and draws a
 light pillar for every key you type. You can unlock with your password or by touching a
@@ -8,8 +10,6 @@ YubiKey.
 ![Locking and unlocking with kabi-lock](docs/images/lock-unlock.gif)
 
 *Locking and then unlocking on sway.*
-
-日本語の説明は[下](#日本語)にあります。
 
 ## Features
 
@@ -289,42 +289,3 @@ Logs are controlled with `RUST_LOG`.
 kabi-lock is released under the [BSD 3-Clause License](LICENSE).
 The [Inter](https://rsms.me/inter/) font built into the binary is licensed under the
 SIL Open Font License 1.1 (`assets/fonts/LICENSE.txt`).
-
----
-
-## 日本語
-
-kabi-lock は sway 向けの画面ロッカーです。ロックすると画面が黒からぼかしたスクリーンショットへ
-フェードインし、時計と日付、打鍵ごとに立ち上がる光の柱を表示します。パスワードでも YubiKey の
-タッチでも解除できます。
-
-- **必要なもの**: `ext-session-lock-v1` が使える sway、EGL と OpenGL ES 3 の
-  ドライバー、PAM。`wlr-screencopy` は任意で、なければ背景が黒になります。YubiKey は `pam_u2f`、
-  KeePassXC 連携は KeePassXC（Secret Service を有効に）があるときだけ使います。fontconfig
-  （`fc-list`、`fc-match`）は Arch のパッケージには依存として入り、ソースから作るときは任意です。
-  なければ（または約 1 秒待っても終わらなければ）時計と日付は内蔵の Inter になり、ラテン文字以外の
-  曜日や月の名前は四角で表示されることがあります。
-- **インストール（Arch）**: `PKGBUILD` を取って `makepkg -si`（上の「Install」を参照）。
-  `/etc/pam.d/kabi-lock` が入ります。ソースから入れるときは、`packaging/pam.d/kabi-lock` を
-  自分で `/etc/pam.d/` に置いてください。`auth` と `account` の両方の行が必要です
-  （`account` がないと正しいパスワードでも通りません）。ファイルがないと kabi-lock は
-  ロックを取らずに終了します。
-- **sway の設定**: `bindsym $mod+l exec kabi-lock`（`contrib/sway/kabi-lock.conf`）。
-  sway の初期設定では `$mod+l` が「右へフォーカス」なので、重なる場合はどちらかを変えてください。
-- **設定**: `~/.config/kabi-lock/config.toml`（すべて省略可。ファイルがなければ黙って初期値、
-  読めない・壊れているときは警告を出して初期値になります）。全キーと初期値は
-  `docs/config.example.toml`（インストール後は `/usr/share/kabi-lock/config.example.toml`）にあります。
-  時計を出す画面は `display.primary` に出力名（`DP-10`）かモニターの説明文を並べて選びます。
-  解除のアニメーションの長さは `appearance.unlock_open_ms`（錠が開くまで、初期値 800）と
-  `appearance.unlock_reveal_ms`（ぼかしが晴れるまで、初期値 700）で変えられます（ミリ秒、上限 5000、0 で一瞬）。
-- **YubiKey**: `authfile` の場所は人ごとに違うので、PAM の設定は自動では入りません。
-  `contrib/pam.d/kabi-lock-u2f` を `/etc/pam.d/` にコピーして直すか、
-  `auth.u2f.pam_service` に既存の設定（例 `u2f-touch`）を指定します。この PAM サービスは
-  **`pam_u2f` だけ**にしてください。`nouserok` と `alwaysok` は付けない（鍵がなくても誰でも通る）、
-  PIN や `interactive` など入力を求める設定にしない（求められると、そのロックでは YubiKey 解除を
-  あきらめ、パスワードだけになります）、`pam_faillock` やパスワードのモジュールも入れない
-  （1 秒ごとに繰り返し呼ばれるので失敗が毎秒積み上がります）。PIN なし、タッチだけです。
-- **注意**: 付属の例では YubiKey に触れるだけで解除されます（PIN なし）。鍵を挿したまま席を離れないでください。
-  パスワードを間違えると、`login` の PAM に `pam_faillock` があればアカウントがロックされます。
-  kabi-lock が異常終了しても sway はロックしたままなので、もう一度起動すれば解除できます。
-- **ライセンス**: BSD-3-Clause。同梱の Inter フォントは SIL OFL 1.1。
