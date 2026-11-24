@@ -3,7 +3,9 @@
 //! タッチ待ちは子プロセスで行う。kabi-lock 自身を `--u2f-helper <PAM サービス>` で起動し直し、
 //! 子（helper）は pam_u2f だけの PAM サービスで `pam_authenticate` を 1 回呼んで、結果を終了コードで返す。
 //! 親では見張りスレッドが子の終了を待ち、成功なら `AuthEvent::U2fSucceeded` を 1 回送って終わる。
-//! 失敗なら `RETRY_DELAY` あけて子を起動し直す。
+//! 失敗なら `RETRY_DELAY` あけて子を起動し直す。ただし PAM サービスが入力（パスワードなど）を
+//! 求めたときは設定の誤りとみなし、そのロック中は起動し直さない（`pam_faillock` の失敗回数を
+//! 1 秒ごとに積み上げて、アカウントがロックされるのを防ぐ）。
 //!
 //! `pam_authenticate` は途中で止められないが、子プロセスなら止められる。解除が決まったら
 //! `U2fHandle::stop`（`Drop` でも呼ばれる）で子を止める。YubiKey がタッチを待ったまま残ると、
@@ -173,16 +175,23 @@ enum Next {
     Stop,
     /// 間をあけて起動し直す。
     Retry,
+    /// PAM サービスが入力を求めた（設定の誤り）。このロック中はもう起動しない。
+    GiveUp,
 }
 
 /// 止められていれば（成功していても）何も知らせない。解除はもう決まっているため。
+///
+/// 入力を求められたときは再試行しない。そのサービスが `pam_unix` などに落ちる作りだと、
+/// 試すたびに `pam_faillock` の失敗として数えられ、すぐにアカウントがロックされてしまう。
 fn next_step(exit: HelperExit, stopped: bool) -> Next {
     if stopped {
         Next::Stop
-    } else if exit == HelperExit::Accepted {
-        Next::Succeed
     } else {
-        Next::Retry
+        match exit {
+            HelperExit::Accepted => Next::Succeed,
+            HelperExit::AskedForInput => Next::GiveUp,
+            _ => Next::Retry,
+        }
     }
 }
 
@@ -210,13 +219,11 @@ fn report(log: &mut FailureLog, exit: HelperExit) {
         HelperExit::Rejected => {
             info!("u2f: no touch accepted; retrying every {RETRY_DELAY:?}");
         }
-        HelperExit::AskedForInput => warn!(
-            "u2f: the pam service asked for input and was refused; it should contain only pam_u2f"
-        ),
         HelperExit::SetupFailed => warn!("u2f: the helper could not start a PAM transaction"),
         HelperExit::Other(code) => warn!("u2f: the helper ended unexpectedly (exit code {code:?})"),
         HelperExit::NotStarted => warn!("u2f: the helper could not be started"),
-        HelperExit::Accepted => {}
+        // 成功は `supervise` が、入力の要求は諦めるときに 1 回だけログに出す
+        HelperExit::Accepted | HelperExit::AskedForInput => {}
     }
 }
 
@@ -310,7 +317,13 @@ fn signal(child: &Child, signal: Signal) {
 }
 
 /// 見張りスレッドを起動する。`make` は helper を起動するコマンドを作る（テストでは別のコマンドに替える）。
-fn start<F, S>(make: F, on_success: S, retry_delay: Duration) -> std::io::Result<U2fHandle>
+/// `service` はログに出す PAM サービスの名前。
+fn start<F, S>(
+    service: String,
+    make: F,
+    on_success: S,
+    retry_delay: Duration,
+) -> std::io::Result<U2fHandle>
 where
     F: Fn() -> Command + Send + 'static,
     S: FnOnce() + Send + 'static,
@@ -324,7 +337,7 @@ where
     });
     let thread = thread::Builder::new().name("kabi-u2f".into()).spawn({
         let shared = Arc::clone(&shared);
-        move || supervise(&shared, make, on_success, retry_delay)
+        move || supervise(&shared, &service, make, on_success, retry_delay)
     })?;
     Ok(U2fHandle {
         shared,
@@ -332,8 +345,8 @@ where
     })
 }
 
-/// helper を起動して終わりを待つ、を成功するか止められるまで繰り返す。
-fn supervise<F, S>(shared: &Shared, make: F, on_success: S, retry_delay: Duration)
+/// helper を起動して終わりを待つ、を成功するか止められるか、入力を求められるまで繰り返す。
+fn supervise<F, S>(shared: &Shared, service: &str, make: F, on_success: S, retry_delay: Duration)
 where
     F: Fn() -> Command,
     S: FnOnce(),
@@ -370,6 +383,13 @@ where
                 return;
             }
             Next::Stop => return,
+            Next::GiveUp => {
+                warn!(
+                    "u2f: PAM service {service} asks for a password; \
+                     security-key unlock is off until the next lock"
+                );
+                return;
+            }
             Next::Retry => {
                 report(&mut log, exit);
                 let state = shared.lock();
@@ -410,23 +430,27 @@ fn wait_and_reap(shared: &Shared, pid: u32) -> Option<i32> {
 /// pam_u2f の PAM サービスで、成功するまでタッチ待ちを繰り返す（helper を起動し直す）。
 ///
 /// 成功したら `AuthEvent::U2fSucceeded` を 1 回送って見張りスレッドが終わる。失敗したら 1 秒あけて再試行。
+/// PAM サービスが入力を求めたら、警告を 1 回出してこのロック中は再試行しない。
 /// PAM サービスの設定ファイルがない、またはスレッドを起動できなければ `None`（タッチでは解除できない）。
 pub fn spawn(service: String, events: Sender<AuthEvent>) -> Option<U2fHandle> {
     let Some(file) = find_service_file(&service, &PAM_DIRS) else {
         warn!("u2f: pam service {service:?} not found in {PAM_DIRS:?}; YubiKey unlock is off");
         return None;
     };
-    let make = move || {
-        let mut command = Command::new(SELF_EXE);
-        command.arg(HELPER_ARG).arg(&service);
-        command
+    let make = {
+        let service = service.clone();
+        move || {
+            let mut command = Command::new(SELF_EXE);
+            command.arg(HELPER_ARG).arg(&service);
+            command
+        }
     };
     let on_success = move || {
         if events.send(AuthEvent::U2fSucceeded).is_err() {
             debug!("u2f: event loop is gone; dropping the result");
         }
     };
-    match start(make, on_success, RETRY_DELAY) {
+    match start(service, make, on_success, RETRY_DELAY) {
         Ok(handle) => {
             info!("u2f: waiting for a touch (pam service {})", file.display());
             Some(handle)
@@ -523,6 +547,11 @@ mod supervisor_tests {
     fn next_step_table() {
         assert_eq!(next_step(HelperExit::Accepted, false), Next::Succeed);
         assert_eq!(next_step(HelperExit::Rejected, false), Next::Retry);
+        assert_eq!(next_step(HelperExit::SetupFailed, false), Next::Retry);
+        assert_eq!(next_step(HelperExit::Other(Some(2)), false), Next::Retry);
+        // 入力を求めるサービスで繰り返すと pam_faillock の失敗が積み上がるので、このロック中はやめる
+        assert_eq!(next_step(HelperExit::AskedForInput, false), Next::GiveUp);
+        assert_eq!(next_step(HelperExit::AskedForInput, true), Next::Stop);
         assert_eq!(next_step(HelperExit::NotStarted, false), Next::Retry);
         assert_eq!(next_step(HelperExit::Other(None), false), Next::Retry);
         assert_eq!(next_step(HelperExit::Accepted, true), Next::Stop);
@@ -585,6 +614,10 @@ mod supervisor_tests {
     /// helper の `sleep 30` や再試行の待ち 60 秒よりは十分に短いので、止まらないときは見分けられる。
     const QUICK: Duration = Duration::from_secs(5);
 
+    fn test_service() -> String {
+        "kabi-lock-test".into()
+    }
+
     fn sh(script: &'static str) -> impl Fn() -> Command + Send + 'static {
         move || {
             let mut command = Command::new("sh");
@@ -624,7 +657,7 @@ mod supervisor_tests {
     #[test]
     fn success_is_reported_once_and_the_thread_ends() {
         let (on_success, rx) = success_channel();
-        let mut handle = start(sh("exit 0"), on_success, SHORT).unwrap();
+        let mut handle = start(test_service(), sh("exit 0"), on_success, SHORT).unwrap();
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let started = Instant::now();
         handle.stop();
@@ -648,7 +681,7 @@ mod supervisor_tests {
             }
         };
         let (on_success, rx) = success_channel();
-        let _handle = start(make, on_success, SHORT).unwrap();
+        let _handle = start(test_service(), make, on_success, SHORT).unwrap();
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(*calls.lock().unwrap(), 3);
     }
@@ -656,7 +689,7 @@ mod supervisor_tests {
     #[test]
     fn stop_kills_a_waiting_helper() {
         let (on_success, rx) = success_channel();
-        let mut handle = start(sh("exec sleep 30"), on_success, SHORT).unwrap();
+        let mut handle = start(test_service(), sh("exec sleep 30"), on_success, SHORT).unwrap();
         let pid = wait_for_child(&handle);
         let started = Instant::now();
         handle.stop();
@@ -668,7 +701,7 @@ mod supervisor_tests {
     #[test]
     fn drop_stops_the_helper() {
         let (on_success, _rx) = success_channel();
-        let handle = start(sh("exec sleep 30"), on_success, SHORT).unwrap();
+        let handle = start(test_service(), sh("exec sleep 30"), on_success, SHORT).unwrap();
         let pid = wait_for_child(&handle);
         drop(handle);
         assert!(process_gone(pid));
@@ -677,7 +710,13 @@ mod supervisor_tests {
     #[test]
     fn a_helper_ignoring_sigterm_is_killed() {
         let (on_success, _rx) = success_channel();
-        let mut handle = start(sh("trap '' TERM; exec sleep 30"), on_success, SHORT).unwrap();
+        let mut handle = start(
+            test_service(),
+            sh("trap '' TERM; exec sleep 30"),
+            on_success,
+            SHORT,
+        )
+        .unwrap();
         let pid = wait_for_child(&handle);
         // sh が trap を設定し終えるまで待つ（その前の SIGTERM では普通に終わってしまう）
         thread::sleep(Duration::from_millis(200));
@@ -692,7 +731,13 @@ mod supervisor_tests {
     #[test]
     fn stop_during_the_retry_delay_is_quick() {
         let (on_success, rx) = success_channel();
-        let mut handle = start(sh("exit 1"), on_success, Duration::from_secs(60)).unwrap();
+        let mut handle = start(
+            test_service(),
+            sh("exit 1"),
+            on_success,
+            Duration::from_secs(60),
+        )
+        .unwrap();
         // 最初の helper が終わって、再試行の待ちに入るまで待つ
         thread::sleep(Duration::from_millis(200));
         let started = Instant::now();
@@ -702,9 +747,35 @@ mod supervisor_tests {
     }
 
     #[test]
+    fn a_helper_asking_for_input_is_not_restarted() {
+        let calls = Arc::new(Mutex::new(0u32));
+        let make = {
+            let calls = Arc::clone(&calls);
+            move || {
+                *calls.lock().unwrap() += 1;
+                let mut command = Command::new("sh");
+                command.arg("-c").arg("exit 3");
+                command
+            }
+        };
+        let (on_success, rx) = success_channel();
+        let mut handle = start(test_service(), make, on_success, SHORT).unwrap();
+        // 再試行しないなら、見張りスレッドは自分で終わる
+        let deadline = Instant::now() + QUICK;
+        while !handle.thread.as_ref().unwrap().is_finished() {
+            assert!(Instant::now() < deadline, "the supervisor kept retrying");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*calls.lock().unwrap(), 1);
+        handle.stop();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn a_command_that_cannot_start_is_retried() {
         let (on_success, rx) = success_channel();
         let mut handle = start(
+            test_service(),
             || Command::new("/nonexistent/kabi-lock-helper"),
             on_success,
             SHORT,
