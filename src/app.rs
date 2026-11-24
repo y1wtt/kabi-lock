@@ -571,6 +571,9 @@ impl SessionLockHandler for App {
             out.size.0,
             out.size.1
         );
+        // GPU が使えれば EGL サーフェスを作る。使えなければ（作れなければ）shm の黒
+        self.try_gpu_render(index);
+        let out = &mut self.outputs[index];
         if out.render.is_none() {
             out.render = Some(OutputRender::Shm(ShmBlack::new()));
         }
