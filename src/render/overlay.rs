@@ -2,8 +2,12 @@
 //!
 //! 何をどこに描くかは `scene`（純粋）で決め、ここでは egui の図形にして GL で描くだけにする。
 
-use std::process::Command;
-use std::sync::Arc;
+use std::fmt;
+use std::io::{self, Read as _};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use egui::epaint::text::VariationCoords;
 use egui::text::LayoutJob;
@@ -42,6 +46,11 @@ const CLOCK_ALPHA: f32 = 0.94;
 const DATE_ALPHA: f32 = 0.74;
 /// U 字のベジェ 1 本あたりの分割数。
 const SHACKLE_SEGMENTS: usize = 16;
+/// fontconfig の子プロセス（`fc-list`・`fc-match`）を待つ期限（2 つ合わせて、集め始めてから）。
+/// ロック要求の前に待つので、これを過ぎたら埋め込みの Inter・補助フォントなしで続ける。
+const FONTCONFIG_TIMEOUT: Duration = Duration::from_secs(1);
+/// 子プロセスが終わったかを確かめる間隔。
+const CHILD_POLL: Duration = Duration::from_millis(5);
 
 /// 時計・日付・光の柱・錠を描く。GL の準備（シェーダー・フォント・アトラス）はロック前に済ませる。
 pub struct Overlay {
@@ -50,17 +59,23 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    /// 時計・日付のフォントを選んで登録し、`date_needs_fallback` なら fontconfig の
-    /// 日本語などのフォントを補いに足す。
+    /// 時計・日付のフォントを選んで登録し、日付に要れば fontconfig の日本語などのフォントを補いに足す。
     ///
-    /// フォントは fontconfig で `font_family`（`appearance.font`）を探し、太さ 500（時計）と
-    /// 400（日付）のファイルを読む。使えなければ埋め込みの Inter にする（理由はログに出す）。
+    /// フォントは `queries`（先に起動しておいた fontconfig）の答えで `appearance.font` の
+    /// 太さ 500（時計）と 400（日付）のファイルを読む。使えなければ埋め込みの Inter にする
+    /// （理由はログに出す）。fontconfig の答えは `FONTCONFIG_TIMEOUT` まで待つ。
     /// 呼ぶときは `gpu` のコンテキストが current であること（`Gpu::new` の直後はサーフェスなしで current）。
-    pub fn new(gpu: &Gpu, font_family: &str, date_needs_fallback: bool) -> Result<Overlay, String> {
+    pub fn new(gpu: &Gpu, queries: FontQueries) -> Result<Overlay, String> {
         let painter = egui_glow::Painter::new(gpu.gl().clone(), "", None, false)
             .map_err(|e| format!("egui_glow painter: {e}"))?;
         let ctx = Context::default();
-        let chosen = match system_fonts(font_family) {
+        let deadline = Instant::now() + FONTCONFIG_TIMEOUT;
+        let FontQueries {
+            family: font_family,
+            list,
+            fallback,
+        } = queries;
+        let chosen = match system_fonts(&font_family, list, deadline) {
             Ok((clock, date)) => Some((clock, date)),
             Err(reason) => {
                 if reason == Fallback::NotFound(config::DEFAULT_FONT.into()) {
@@ -74,11 +89,8 @@ impl Overlay {
                 None
             }
         };
-        let fallback = if date_needs_fallback {
-            fallback_font()
-        } else {
-            None
-        };
+        let fallback =
+            fallback.and_then(|(pattern, child)| fallback_font(&pattern, child, deadline));
         ctx.set_fonts(font_definitions(chosen, fallback));
         let mut overlay = Overlay { ctx, painter };
         overlay.warm_up();
@@ -206,26 +218,156 @@ fn font_definitions(
     fonts
 }
 
+/// ロック前に起動しておく fontconfig の問い合わせ。撮影と並行に走らせ、`Overlay::new` で
+/// 期限付きで答えを集める（設計書 5 章 2）。
+pub struct FontQueries {
+    /// `appearance.font`。
+    family: String,
+    /// `fc-list`（一覧を取る。`fc-match` は似たフォントで代用してしまうので使わない）。
+    /// 名前が空・起動できないときは埋め込みの Inter に戻す理由。
+    list: Result<PendingChild, Fallback>,
+    /// 日付に補助フォントが要るときの `fc-match`（パターン, 子プロセス）。
+    fallback: Option<(String, io::Result<PendingChild>)>,
+}
+
+impl FontQueries {
+    /// `fc-list` と、`date_needs_fallback` なら `fc-match` を起動する（待たない）。
+    pub fn spawn(family: &str, date_needs_fallback: bool) -> FontQueries {
+        let list = if family.trim().is_empty() {
+            Err(Fallback::EmptyName)
+        } else {
+            PendingChild::spawn(
+                Command::new("fc-list")
+                    .arg(format!("--format={}", fonts::FC_LIST_FORMAT))
+                    .arg(fonts::fc_pattern(family.trim())),
+            )
+            .map_err(|e| Fallback::FontconfigUnavailable(format!("cannot run fc-list: {e}")))
+        };
+        let fallback = date_needs_fallback.then(|| {
+            let pattern = fallback_pattern();
+            let child = PendingChild::spawn(
+                Command::new("fc-match")
+                    .arg("--format=%{file}\n%{index}")
+                    .arg(&pattern),
+            );
+            (pattern, child)
+        });
+        FontQueries {
+            family: family.to_owned(),
+            list,
+            fallback,
+        }
+    }
+}
+
+/// 起動した子プロセス。標準出力は別スレッドで最後まで読む（パイプが詰まって子が止まらないように）。
+///
+/// 集めずに捨てたとき・期限を過ぎたときは kill し、回収は別スレッドで行う（ここで止まらない）。
+struct PendingChild {
+    child: Option<Child>,
+    stdout: mpsc::Receiver<Vec<u8>>,
+}
+
+/// 子プロセスの答えが得られなかった理由。ログに出す。
+#[derive(Debug, PartialEq)]
+enum ChildError {
+    TimedOut,
+    Failed(String),
+    Io(String),
+}
+
+impl fmt::Display for ChildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChildError::TimedOut => write!(f, "timed out"),
+            ChildError::Failed(status) => write!(f, "exited with {status}"),
+            ChildError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl PendingChild {
+    /// 標準入力・標準エラーは捨て、標準出力だけをパイプでつないで起動する。
+    fn spawn(command: &mut Command) -> io::Result<PendingChild> {
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let (tx, rx) = mpsc::channel();
+        if let Some(mut out) = child.stdout.take() {
+            thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = out.read_to_end(&mut buf);
+                let _ = tx.send(buf);
+            });
+        }
+        Ok(PendingChild {
+            child: Some(child),
+            stdout: rx,
+        })
+    }
+
+    /// `deadline` までに正常に終われば、その標準出力を返す。
+    /// 過ぎたら kill して `TimedOut`（回収は `Drop` が別スレッドで行う）。
+    fn wait_until(mut self, deadline: Instant) -> Result<Vec<u8>, ChildError> {
+        let Some(child) = self.child.as_mut() else {
+            return Err(ChildError::Io("no child process".into()));
+        };
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(ChildError::TimedOut);
+                    }
+                    thread::sleep(CHILD_POLL.min(deadline - now));
+                }
+                Err(e) => return Err(ChildError::Io(e.to_string())),
+            }
+        };
+        if !status.success() {
+            return Err(ChildError::Failed(status.to_string()));
+        }
+        // 子が終わればパイプが閉じて読み終わる。孫がパイプを持ち続けるときに備えて期限を付ける
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        self.stdout
+            .recv_timeout(remaining)
+            .map_err(|_| ChildError::TimedOut)
+    }
+}
+
+impl Drop for PendingChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let _ = child.kill();
+        // 止まっている子（ディスク待ちなど）の回収でロック要求を遅らせない
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+}
+
 /// `appearance.font` のファミリーの、時計用（500）と日付用（400）のフォントを読む。
 ///
-/// fontconfig の `fc-list` で一覧を取り（`fc-match` は似たフォントで代用してしまうので使わない）、
-/// どれを使うかは `fonts::pick_faces` が決める。読めない・egui が扱えないファイルなら `Err`。
-fn system_fonts(family: &str) -> Result<(FontData, FontData), Fallback> {
-    if family.trim().is_empty() {
-        return Err(Fallback::EmptyName);
-    }
-    let output = Command::new("fc-list")
-        .arg(format!("--format={}", fonts::FC_LIST_FORMAT))
-        .arg(fonts::fc_pattern(family.trim()))
-        .output()
-        .map_err(|e| Fallback::FontconfigUnavailable(e.to_string()))?;
-    if !output.status.success() {
-        return Err(Fallback::FontconfigUnavailable(format!(
-            "fc-list exited with {}",
-            output.status
-        )));
-    }
-    let faces = fonts::parse_fc_list(&String::from_utf8_lossy(&output.stdout));
+/// `list` は先に起動しておいた `fc-list`。答えは `deadline` まで待つ。
+/// どれを使うかは `fonts::pick_faces` が決める。fontconfig が答えない・読めない・
+/// egui が扱えないファイルなら `Err`。
+fn system_fonts(
+    family: &str,
+    list: Result<PendingChild, Fallback>,
+    deadline: Instant,
+) -> Result<(FontData, FontData), Fallback> {
+    let stdout = list?
+        .wait_until(deadline)
+        .map_err(|e| Fallback::FontconfigUnavailable(format!("fc-list {e}")))?;
+    let faces = fonts::parse_fc_list(&String::from_utf8_lossy(&stdout));
     let (clock, date) = fonts::pick_faces(family, &faces)?;
     // 可変フォントなどで同じファイルを 2 回読まない
     let clock_bytes = read_font_file(&clock.file)?;
@@ -276,36 +418,40 @@ fn face_data(pick: &FacePick, bytes: Arc<Vec<u8>>) -> Result<FontData, Fallback>
     })
 }
 
-/// 日時のロケールの言語で fontconfig にフォントを尋ね、読み込む。
-///
-/// `fc-match` を子プロセスで呼ぶ（C のライブラリを直接つながないので unsafe もビルド時の依存も要らず、
-/// デスクトップの他のアプリと同じ規則で選ばれる）。見つからない・読めない・壊れているときは `None`
-/// （その文字は表示されないが、ロックは続ける）。
-fn fallback_font() -> Option<FontData> {
+/// 日時のロケールの言語で fontconfig に尋ねるパターン（`sans-serif:lang=ja` など）。
+fn fallback_pattern() -> String {
     let lc_all = std::env::var("LC_ALL").ok();
     let lc_time = std::env::var("LC_TIME").ok();
     let lang = std::env::var("LANG").ok();
     let locale = scene::time_locale_name(lc_all.as_deref(), lc_time.as_deref(), lang.as_deref());
-    let pattern = match scene::language(locale) {
+    match scene::language(locale) {
         Some(lang) => format!("sans-serif:lang={lang}"),
         None => "sans-serif".to_owned(),
-    };
-    let output = match Command::new("fc-match")
-        .arg("--format=%{file}\n%{index}")
-        .arg(&pattern)
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            log::warn!("fc-match {pattern} failed: {}", output.status);
+    }
+}
+
+/// 日時のロケールの言語のフォントを、先に起動しておいた `fc-match` の答えで読み込む。
+///
+/// `fc-match` を子プロセスで呼ぶ（C のライブラリを直接つながないので unsafe もビルド時の依存も要らず、
+/// デスクトップの他のアプリと同じ規則で選ばれる）。答えは `deadline` まで待つ。答えない・
+/// 見つからない・読めない・壊れているときは `None`（その文字は表示されないが、ロックは続ける）。
+fn fallback_font(
+    pattern: &str,
+    child: io::Result<PendingChild>,
+    deadline: Instant,
+) -> Option<FontData> {
+    let stdout = match child.map(|c| c.wait_until(deadline)) {
+        Ok(Ok(stdout)) => stdout,
+        Ok(Err(e)) => {
+            log::warn!("fc-match {pattern} {e}; no fallback font for the date");
             return None;
         }
         Err(e) => {
-            log::warn!("cannot run fc-match: {e}");
+            log::warn!("cannot run fc-match: {e}; no fallback font for the date");
             return None;
         }
     };
-    let (file, index) = scene::parse_fc_match(&String::from_utf8_lossy(&output.stdout))?;
+    let (file, index) = scene::parse_fc_match(&String::from_utf8_lossy(&stdout))?;
     let bytes = match std::fs::read(&file) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -462,8 +608,8 @@ pub struct OverlayHost {
     primary: PrimaryTracker,
     date: DateStyle,
     input: config::Input,
-    /// `appearance.font`。`attach_gpu` で fontconfig に尋ねる。
-    font: String,
+    /// 先に起動しておいた fontconfig の問い合わせ。`attach_gpu` で答えを集める。
+    font_queries: Option<FontQueries>,
     /// 最後に柱を出した時刻。これから `pillar_fade_ms` の間は柱が動いている。
     last_keystroke_ms: Option<u64>,
     /// 最後に描いた内容（変わったときだけ描き直すため）。
@@ -480,7 +626,8 @@ struct Drawn {
 }
 
 impl OverlayHost {
-    /// App を作るときに呼ぶ（ロックの前）。GL はまだ使わない。
+    /// App を作るときに呼ぶ（ロックの前、撮影より先）。GL はまだ使わない。
+    /// fontconfig の子プロセスをここで起動して撮影と並行に走らせ、答えは `attach_gpu` で集める。
     /// ロック前にフォーカスしていた出力を sway IPC で尋ねるのもここ。
     pub fn new(config: &Config) -> OverlayHost {
         let lc_all = std::env::var("LC_ALL").ok();
@@ -491,6 +638,9 @@ impl OverlayHost {
             lc_time.as_deref(),
             lang.as_deref(),
         ));
+        let date = DateStyle::new(&config.appearance.date_format, locale);
+        let font_queries =
+            FontQueries::spawn(&config.appearance.font, scene::needs_fallback_font(&date));
         let focused = crate::wl::outputs::focused_output();
         log::info!("focused output before locking: {focused:?}");
         let input = config.input.clone();
@@ -500,9 +650,9 @@ impl OverlayHost {
             overlay: None,
             lanes: LaneAllocator::new(count, u64::from(input.pillar_fade_ms), fastrand::Rng::new()),
             primary: PrimaryTracker::new(config.display.primary.clone(), focused),
-            date: DateStyle::new(&config.appearance.date_format, locale),
+            date,
             input,
-            font: config.appearance.font.clone(),
+            font_queries: Some(font_queries),
             last_keystroke_ms: None,
             last: None,
             previous_primary: None,
@@ -512,7 +662,10 @@ impl OverlayHost {
     /// GPU が使えるようになったら（ロックの前に）呼ぶ。シェーダー・フォント・アトラスを準備する。
     /// 失敗したら重ね物なしで続ける（背景とパスワード入力は動く）。
     pub fn attach_gpu(&mut self, gpu: &Gpu) {
-        match Overlay::new(gpu, &self.font, scene::needs_fallback_font(&self.date)) {
+        let Some(queries) = self.font_queries.take() else {
+            return;
+        };
+        match Overlay::new(gpu, queries) {
             Ok(overlay) => self.overlay = Some(overlay),
             Err(e) => log::warn!("overlay disabled: {e}"),
         }
@@ -727,6 +880,47 @@ mod tests {
             read_font_file("/nonexistent/kabi-lock.ttf"),
             Err(Fallback::Unreadable { .. })
         ));
+    }
+
+    fn sh(script: &str) -> PendingChild {
+        PendingChild::spawn(Command::new("sh").arg("-c").arg(script)).unwrap()
+    }
+
+    #[test]
+    fn child_output_is_collected_before_the_deadline() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert_eq!(sh("echo x").wait_until(deadline), Ok(b"x\n".to_vec()));
+        // パイプの容量（64 KiB）を超える出力でも詰まらない
+        let big = sh("head -c 200000 /dev/zero").wait_until(deadline).unwrap();
+        assert_eq!(big.len(), 200_000);
+    }
+
+    #[test]
+    fn failing_child_is_an_error() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert!(matches!(
+            sh("exit 3").wait_until(deadline),
+            Err(ChildError::Failed(_))
+        ));
+        assert!(PendingChild::spawn(&mut Command::new("/nonexistent/kabi-lock-test")).is_err());
+    }
+
+    #[test]
+    fn slow_child_is_killed_at_the_deadline() {
+        let start = Instant::now();
+        let child = PendingChild::spawn(Command::new("sleep").arg("5")).unwrap();
+        let result = child.wait_until(start + Duration::from_millis(200));
+        let elapsed = start.elapsed();
+        assert_eq!(result, Err(ChildError::TimedOut));
+        assert!(elapsed >= Duration::from_millis(200), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    }
+
+    #[test]
+    fn dropping_an_uncollected_child_does_not_block() {
+        let start = Instant::now();
+        drop(PendingChild::spawn(Command::new("sleep").arg("5")).unwrap());
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
 
     #[test]
