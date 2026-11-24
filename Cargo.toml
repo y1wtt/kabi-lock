@@ -16,4 +16,5 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_ignored = "0.1.14"
 smithay-client-toolkit = "0.21.1"
 toml = "1.2.2"
+wayland-client = "0.31.15"
 zeroize = "1.9.2"

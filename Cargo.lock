@@ -370,6 +370,7 @@ dependencies = [
  "serde_ignored",
  "smithay-client-toolkit",
  "toml",
+ "wayland-client",
  "zeroize",
 ]
 
