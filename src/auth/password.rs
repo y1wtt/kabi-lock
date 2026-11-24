@@ -248,6 +248,27 @@ mod tests {
     }
 
     #[test]
+    fn dropping_a_reply_without_sending_reports_failure_once() {
+        let (tx, rx) = channel();
+        let reply = Reply::new(&tx);
+        drop(reply);
+        // 送り忘れていたら固まらずに失敗するよう、待たずに取り出す
+        assert_eq!(rx.try_recv().unwrap(), checked(false));
+        // 送信側を手放すと、余分な結果がなければ「閉じた」が返る
+        drop(tx);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_sent_reply_does_not_report_again_on_drop() {
+        let (tx, rx) = channel();
+        Reply::new(&tx).send(true);
+        assert_eq!(rx.recv().unwrap(), checked(true));
+        drop(tx);
+        assert!(rx.recv().is_err());
+    }
+
+    #[test]
     fn response_keeps_the_bytes() {
         let response = response_cstring("pässword").unwrap();
         assert_eq!(response.as_bytes(), "pässword".as_bytes());
