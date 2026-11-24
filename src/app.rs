@@ -33,7 +33,11 @@ use wayland_client::{
 };
 use zeroize::Zeroizing;
 
-use crate::auth::{self, AuthEvent, password::PasswordChecker};
+use crate::auth::{
+    self, AuthEvent, keepassxc,
+    password::PasswordChecker,
+    u2f::{self, U2fHandle},
+};
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::input::{self, KeyAction};
@@ -152,9 +156,6 @@ pub struct App {
     /// Plan 3〜5 で見た目や認証の設定を読む。
     #[allow(dead_code)]
     pub(crate) config: Config,
-    /// PAM に渡したユーザー名。Plan 5 の U2F でも使う。
-    #[allow(dead_code)]
-    pub(crate) user: String,
     pub(crate) registry: RegistryState,
     pub(crate) compositor: CompositorState,
     pub(crate) output_state: OutputState,
@@ -171,6 +172,8 @@ pub struct App {
     pub(crate) machine: Machine,
     pub(crate) password: PasswordBuffer,
     pub(crate) checker: PasswordChecker,
+    /// YubiKey のタッチ待ち（Plan 5）。`release_lock` で止める。`None` ならタッチでは解除しない。
+    pub(crate) u2f: Option<U2fHandle>,
     pub(crate) clock: Clock,
     /// 最初の configure を受けた時刻。フェードはここから測る（Plan 3）。
     pub(crate) first_configure_ms: Option<u64>,
@@ -239,6 +242,17 @@ fn set_opaque_region(
     }
 }
 
+/// 設定で有効なら、YubiKey のタッチ待ちを始める（Plan 5）。
+///
+/// PAM サービスの設定ファイルがなければ始めない（`u2f::spawn` が `None` を返す）。
+fn start_u2f(config: &Config, events: channel::Sender<AuthEvent>) -> Option<U2fHandle> {
+    if !config.auth.u2f.enabled {
+        log::info!("u2f: disabled in config");
+        return None;
+    }
+    u2f::spawn(config.auth.u2f.pam_service.clone(), events)
+}
+
 /// ロックして、解除されるまでイベントループを回す。
 ///
 /// ext-session-lock が使えない／拒否されたら `Err`。
@@ -266,7 +280,9 @@ pub fn run(config: Config) -> Result<(), AppError> {
     let mut event_loop: EventLoop<'static, App> =
         EventLoop::try_new().map_err(|e| AppError::Other(format!("event loop: {e}")))?;
     let (auth_tx, auth_rx) = channel::channel::<AuthEvent>();
-    let checker = PasswordChecker::spawn(config.auth.pam_service.clone(), user.clone(), auth_tx);
+    // YubiKey のタッチ待ち（Plan 5）にも同じチャンネルを使う。auth_tx は次の行で move される
+    let u2f_tx = auth_tx.clone();
+    let checker = PasswordChecker::spawn(config.auth.pam_service.clone(), user, auth_tx);
 
     // 重ね物の状態（GL はまだ使わない）。ロック前にフォーカスしていた出力もここで sway に尋ねる
     let overlay = OverlayHost::new(&config);
@@ -274,7 +290,6 @@ pub fn run(config: Config) -> Result<(), AppError> {
         conn: conn.clone(),
         qh: qh.clone(),
         config,
-        user,
         registry: RegistryState::new(&globals),
         compositor,
         output_state: OutputState::new(&globals, &qh),
@@ -289,6 +304,7 @@ pub fn run(config: Config) -> Result<(), AppError> {
         machine: Machine::new(),
         password: PasswordBuffer::new(),
         checker,
+        u2f: None,
         clock,
         first_configure_ms: None,
         overlay,
@@ -338,6 +354,10 @@ pub fn run(config: Config) -> Result<(), AppError> {
         .insert(handle)
         .map_err(|e| AppError::Other(format!("wayland source: {}", e.error)))?;
 
+    // KeePassXC の全 DB のロックを頼む（Plan 5。待たない。確認は裏のスレッドで 2 秒まで）
+    if app.config.keepassxc.lock_before {
+        keepassxc::lock_before_in_background();
+    }
     let lock = app
         .lock_state
         .lock(&qh)
@@ -348,6 +368,8 @@ pub fn run(config: Config) -> Result<(), AppError> {
     for output in app.output_state.outputs() {
         app.add_output(output);
     }
+    // YubiKey のタッチ待ちを始める（Plan 5。成功したら AuthEvent::U2fSucceeded が届く）
+    app.u2f = start_u2f(&app.config, u2f_tx);
 
     while app.exit.is_none() {
         event_loop
@@ -706,6 +728,11 @@ impl App {
         if let Err(e) = self.conn.roundtrip() {
             log::warn!("roundtrip after unlock failed: {e}");
         }
+        // タッチ待ちの helper を止める（Plan 5）。解除後に main が KeePassXC の解除ダイアログを
+        // 出す前に止めて、そのダイアログ用の YubiKey のタッチを横取りしないようにする
+        if let Some(mut u2f) = self.u2f.take() {
+            u2f.stop();
+        }
         self.lock = None;
         self.release_pending = false;
         log::info!("unlocked after {} ms", self.clock.now_ms());
@@ -1040,5 +1067,21 @@ mod tests {
             AppError::Other("event loop failed".into()).to_string(),
             "event loop failed"
         );
+    }
+
+    #[test]
+    fn u2f_is_not_started_when_disabled() {
+        let mut config = Config::default();
+        config.auth.u2f.enabled = false;
+        let (tx, _rx) = channel::channel::<AuthEvent>();
+        assert!(start_u2f(&config, tx).is_none());
+    }
+
+    #[test]
+    fn u2f_is_not_started_without_a_pam_service_file() {
+        let mut config = Config::default();
+        config.auth.u2f.pam_service = "kabi-lock-test-no-such-service".into();
+        let (tx, _rx) = channel::channel::<AuthEvent>();
+        assert!(start_u2f(&config, tx).is_none());
     }
 }
