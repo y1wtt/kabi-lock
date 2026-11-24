@@ -4,7 +4,7 @@
 
 **Goal:** YubiKey のタッチ（pam_u2f）でもロックを解除できるようにし、ロック前の KeePassXC の全 DB ロック（確認と通知つき）と、解除後の KeePassXC の解除要求を、設定で切り替えられる形で入れる。
 
-**Architecture:** YubiKey のタッチ待ちは**子プロセス**で行う。kabi-lock は自分自身を `--u2f-helper <PAM サービス>`（隠し引数）で起動し直し、子（helper）は pam_u2f だけの PAM サービスで `pam_authenticate` を 1 回呼んで、結果を終了コードで返す。親の `src/auth/u2f.rs` の見張りスレッドは、子が 0 で終われば Plan 2 のパスワード確認と同じ calloop のチャンネルに `AuthEvent::U2fSucceeded` を 1 回送り、それ以外なら 1 秒あけて子を起動し直す。`pam_authenticate` はスレッドの中では止められないが、子プロセスなら止められるので、ロックを外すとき（KeePassXC の解除ダイアログを出す前）に `U2fHandle::stop` で子を止める。`src/auth/keepassxc.rs` は zbus（blocking）で KeePassXC と Secret Service を呼ぶ。テストできる判断（引数の読み取り、終了コードの対応、再試行の判断、ロックされていないコレクションの抽出、2 秒までの確認、D-Bus の値の読み取り、通知の引数）は純粋な関数に分けて TDD で作る。子プロセスの起動と停止は、PAM の代わりに `sh -c 'exit 0'` や `sleep` を helper にしたテストで確かめる。D-Bus と PAM を実際に呼ぶ部分は手動確認にする。
+**Architecture:** YubiKey のタッチ待ちは**子プロセス**で行う。kabi-lock は自分自身を `--u2f-helper <PAM サービス>`（隠し引数）で起動し直し、子（helper）は pam_u2f だけの PAM サービスで `pam_authenticate` を 1 回呼んで、結果を終了コードで返す。親の `src/auth/u2f.rs` の見張りスレッドは、子が 0 で終われば Plan 2 のパスワード確認と同じ calloop のチャンネルに `AuthEvent::U2fSucceeded` を 1 回送り、3（PAM サービスが入力を求めた）ならそのロック中は起動し直さず、それ以外なら 1 秒あけて子を起動し直す。`pam_authenticate` はスレッドの中では止められないが、子プロセスなら止められるので、ロックを外すとき（KeePassXC の解除ダイアログを出す前）に `U2fHandle::stop` で子を止める。`src/auth/keepassxc.rs` は zbus（blocking）で KeePassXC と Secret Service を呼ぶ。テストできる判断（引数の読み取り、終了コードの対応、再試行の判断、ロックされていないコレクションの抽出、2 秒までの確認、D-Bus の値の読み取り、通知の引数）は純粋な関数に分けて TDD で作る。子プロセスの起動と停止は、PAM の代わりに `sh -c 'exit 0'` や `sleep` を helper にしたテストで確かめる。D-Bus と PAM を実際に呼ぶ部分は手動確認にする。
 
 **Tech Stack:** Rust（edition 2024）、pam-client 0.5.0（`default-features = false`、Plan 2 が追加済み）、nix 0.32（Plan 2 が `user` で追加済み。`signal` を足す）、zbus 5（`zbus::blocking`）、smithay-client-toolkit 0.21.1 が再輸出する calloop 0.14 の `channel`、log
 
@@ -42,7 +42,7 @@
 
 - **タッチ待ちは子プロセス（helper）で行う**（設計書 4 章の `auth/u2f` と 6 章のとおり）。解除が決まったら、KeePassXC の解除要求より前に子を止める。止めずにタッチ待ちが残ると、解除後に出す KeePassXC の解除ダイアログ（polkit 経由の pam_u2f）のタッチを横取りするおそれがあるため。今の `swaylock-touch` も `u2f-touch-check` を kill してから解除要求を出している。
   - helper は `/proc/self/exe --u2f-helper <サービス>` で起動する（`current_exe()` ではなく `/proc/self/exe`。ロック中にパッケージの更新でバイナリが置き換わっても、起動中と同じ版が動く）。標準入力・標準出力は `/dev/null`、標準エラーは親と同じ（ログ）。
-  - helper の終了コード: 0 = 認証できた、1 = 認証できなかった（タッチされない・キーがない）、3 = PAM サービスが入力を求めたので断った（設定の誤り）、4 = ユーザー名が分からない／`pam_start` に失敗。2 は `main.rs` の引数の誤り。親は 0 だけを成功とみなし、ほかは再試行する。
+  - helper の終了コード: 0 = 認証できた、1 = 認証できなかった（タッチされない・キーがない）、3 = PAM サービスが入力を求めたので断った（設定の誤り）、4 = ユーザー名が分からない／`pam_start` に失敗。2 は `main.rs` の引数の誤り。親は 0 だけを成功とみなす。3 のときはそのロック中は再試行をやめ、警告を 1 回だけログに出す（その U2F 用サービスが `pam_unix` に落ちる作りだと、1 秒ごとの再試行がそのまま `pam_faillock` の失敗として積み上がり、アカウントがすぐロックされるため）。ほかは再試行する。
   - helper は起動直後に `prctl(PR_SET_PDEATHSIG, SIGTERM)` を設定する。親が異常終了しても、タッチを待ったまま残らない。
   - 止め方: SIGTERM を送り、0.5 秒で終わらなければ SIGKILL。子は回収（`wait`）するまで pid が再利用されないので、親は `waitid(WEXITED | WNOWAIT)` で終わるのを待ってから、ロックを取って回収する。こうすると `stop` が送るシグナルが別のプロセスに届くことはない。
   - 止めるのは `App::release_lock` でロックを外した直後（`main` が `unlock_after` を呼ぶより前）。`U2fHandle` の `Drop` でも止まるので、エラーで `run` を抜けるときも残らない。
