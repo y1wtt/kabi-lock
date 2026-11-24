@@ -49,6 +49,19 @@ const LIFT_MS: f32 = 260.0;
 pub const LONG_LEG_X: f32 = 42.0;
 /// 閉じているときの短い足の x。
 pub const SHORT_LEG_X_CLOSED: f32 = 22.0;
+/// 錠のアイコン全体の大きさ（アイコン座標）。設計では 60x52 px の枠に縦横比を保って収める。
+pub const ICON_W: f32 = 64.0;
+pub const ICON_H: f32 = 56.0;
+/// 錠の本体の左上（アイコン座標）。角丸の塗りつぶしで、鍵穴はない。
+pub const BODY_X: f32 = 14.0;
+pub const BODY_Y: f32 = 24.0;
+/// 錠の本体の大きさ（アイコン座標）。y は 24〜52。
+pub const BODY_W: f32 = 36.0;
+pub const BODY_H: f32 = 28.0;
+/// 錠の本体の角丸の半径（アイコン座標）。
+pub const BODY_RADIUS: f32 = 6.0;
+/// U 字の線の太さ（アイコン座標）。解除中も変えない（丸棒として扱うため）。
+pub const SHACKLE_STROKE: f32 = 3.5;
 
 /// U 字の状態。`lift_y` は上方向が負。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -300,5 +313,55 @@ mod tests {
         ));
         assert_eq!(reveal_progress(REVEAL_START_MS + REVEAL_MS), 1.0);
         const { assert!(REVEAL_START_MS >= SHACKLE_MS) };
+    }
+
+    #[test]
+    fn body_matches_the_design() {
+        assert_eq!(
+            (BODY_X, BODY_Y, BODY_X + BODY_W, BODY_Y + BODY_H),
+            (14.0, 24.0, 50.0, 52.0)
+        );
+        assert_eq!(BODY_RADIUS, 6.0);
+        // 本体はアイコンの左右中央にある
+        assert_eq!(BODY_X + BODY_W / 2.0, ICON_W / 2.0);
+        const { assert!(BODY_Y + BODY_H <= ICON_H) };
+    }
+
+    #[test]
+    fn closed_shackle_ends_are_hidden_by_the_body() {
+        let p = shackle_path(shackle_at(0.0));
+        for end in [p.short_leg_bottom, p.long_leg_bottom] {
+            assert!(end[0] > BODY_X && end[0] < BODY_X + BODY_W);
+            assert!(end[1] > BODY_Y && end[1] < BODY_Y + BODY_H);
+        }
+    }
+
+    #[test]
+    fn long_leg_stays_in_the_body_during_the_whole_unlock() {
+        // 一番高く跳ねたとき（-11px）でも、長い足の下端（丸い端を含む）は本体に隠れる
+        for ms in (0..=SHACKLE_MS as u32).step_by(10) {
+            let p = shackle_path(shackle_at(ms as f32));
+            assert!(p.long_leg_bottom[1] - SHACKLE_STROKE / 2.0 > BODY_Y);
+        }
+    }
+
+    #[test]
+    fn shackle_path_stays_finite_and_in_range() {
+        for ms in (0..=SHACKLE_MS as u32).step_by(5) {
+            let p = shackle_path(shackle_at(ms as f32));
+            let points = [
+                p.short_leg_bottom,
+                p.short_leg_top,
+                p.arc1[0],
+                p.arc1[1],
+                p.arc1[2],
+                p.arc2[0],
+                p.arc2[1],
+                p.arc2[2],
+                p.long_leg_bottom,
+            ];
+            assert!(points.iter().flatten().all(|v| v.is_finite()));
+            assert!((SHORT_LEG_X_CLOSED..=62.0).contains(&p.short_leg_top[0]));
+        }
     }
 }
