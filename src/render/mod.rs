@@ -8,5 +8,6 @@ pub mod shm;
 pub enum OutputRender {
     /// `wl_shm` の黒い画面。
     Shm(shm::ShmBlack),
-    // Plan 3 が追加: Gpu(egl::GpuSurface),
+    /// EGL のウィンドウサーフェスに GL で描く（Plan 3）。
+    Gpu(egl::GpuSurface),
 }

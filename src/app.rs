@@ -38,6 +38,8 @@ use crate::clock::Clock;
 use crate::config::Config;
 use crate::input::{self, KeyAction};
 use crate::password::PasswordBuffer;
+use crate::render::background::Background;
+use crate::render::egl::Gpu;
 use crate::render::{OutputRender, shm::ShmBlack};
 use crate::state::{Action, Event, Machine};
 use crate::wl::outputs::OutputMeta;
@@ -83,13 +85,18 @@ pub(crate) struct LockOutput {
     /// 抜かれたときに探すための wl_output。
     pub(crate) output: wl_output::WlOutput,
     pub(crate) meta: OutputMeta,
+    /// configure 前は `None`。
+    ///
+    /// `lock_surface` より前に置く。フィールドは宣言順に捨てられるので、出力が抜かれたときに
+    /// EGL サーフェスと wl_egl_window が wl_surface より先に壊れる。この順番を変えないこと。
+    pub(crate) render: Option<OutputRender>,
     pub(crate) lock_surface: SessionLockSurface,
     /// configure の論理サイズ。configure 前は (0, 0)。
     pub(crate) size: (u32, u32),
-    /// configure 前は `None`。
-    pub(crate) render: Option<OutputRender>,
-    /// フレームコールバック待ち。Plan 2 はフレームコールバックを要求しない（Plan 3 で使う）。
+    /// フレームコールバック待ち。GPU で描いていて、アニメーション中のときだけ要求する。
     pub(crate) frame_pending: bool,
+    /// wl_surface の buffer_scale。GPU で描くときだけ使う（shm は常に 1）。
+    pub(crate) scale: i32,
 }
 
 /// ロック中の状態。SCTK の各ハンドラはこの型に実装する。
@@ -121,6 +128,10 @@ pub struct App {
     pub(crate) clock: Clock,
     /// 最初の configure を受けた時刻。フェードはここから測る（Plan 3）。
     pub(crate) first_configure_ms: Option<u64>,
+    /// EGL。使えなければ `None`（全出力を shm の黒で描く）。
+    pub(crate) gpu: Option<Gpu>,
+    /// 背景のシェーダーと出力ごとのテクスチャ。`gpu` が `Some` のときだけ `Some`。
+    pub(crate) background: Option<Background>,
     /// `Some` になったらイベントループを抜けて、これを `run` の結果にする。
     pub(crate) exit: Option<Result<(), AppError>>,
 }
@@ -175,6 +186,8 @@ pub fn run(config: Config) -> Result<(), AppError> {
         checker,
         clock,
         first_configure_ms: None,
+        gpu: None,
+        background: None,
         exit: None,
     };
 
@@ -245,6 +258,7 @@ impl App {
                     &self.qh,
                 );
             }
+            Some(OutputRender::Gpu(_)) => {}
             None => {}
         }
     }
@@ -269,6 +283,7 @@ impl App {
             size: (0, 0),
             render: None,
             frame_pending: false,
+            scale: 1,
         });
     }
 
