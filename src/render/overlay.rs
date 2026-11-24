@@ -14,10 +14,12 @@ use egui::{
 use glow::HasContext as _;
 
 use crate::anim;
-use crate::config;
+use crate::config::{self, Config};
 use crate::fonts::{self, FacePick, Fallback};
+use crate::lanes::{self, LaneAllocator};
 use crate::render::egl::Gpu;
-use crate::scene::{self, Layout, Scene};
+use crate::scene::{self, DateStyle, Layout, PrimaryTracker, Scene};
+use crate::state::{Machine, Phase};
 
 /// 埋め込みの Inter（weight 500、時計用）。OFL。ライセンスは `assets/fonts/LICENSE.txt`。
 /// `appearance.font` が使えないときの予備で、使えるときも字形が足りない分を補う。
@@ -447,6 +449,166 @@ fn paint_lock(painter: &Painter, l: &Layout, lock: &scene::LockDraw, color: Colo
     );
     let radius = (anim::BODY_RADIUS * unit).round().clamp(0.0, 255.0) as u8;
     painter.add(Shape::rect_filled(body, CornerRadius::same(radius), color));
+}
+
+/// 重ね物を描くのに要る状態一式（App が 1 つ持つ）。
+///
+/// EGL が使えないとき（`overlay` が `None`）も、柱のレーンなどは動かしてよい（描かないだけ）。
+pub struct OverlayHost {
+    overlay: Option<Overlay>,
+    lanes: LaneAllocator,
+    primary: PrimaryTracker,
+    date: DateStyle,
+    input: config::Input,
+    /// `appearance.font`。`attach_gpu` で fontconfig に尋ねる。
+    font: String,
+    /// 最後に柱を出した時刻。これから `pillar_fade_ms` の間は柱が動いている。
+    last_keystroke_ms: Option<u64>,
+    /// 最後に描いた内容（変わったときだけ描き直すため）。
+    last: Option<Drawn>,
+}
+
+/// 最後に描いた内容のうち、時間で変わるもの。
+struct Drawn {
+    phase: Phase,
+    time_text: String,
+    date_text: String,
+}
+
+impl OverlayHost {
+    /// App を作るときに呼ぶ（ロックの前）。GL はまだ使わない。
+    /// ロック前にフォーカスしていた出力を sway IPC で尋ねるのもここ。
+    pub fn new(config: &Config) -> OverlayHost {
+        let lc_all = std::env::var("LC_ALL").ok();
+        let lc_time = std::env::var("LC_TIME").ok();
+        let lang = std::env::var("LANG").ok();
+        let locale = scene::chrono_locale(scene::time_locale_name(
+            lc_all.as_deref(),
+            lc_time.as_deref(),
+            lang.as_deref(),
+        ));
+        let focused = crate::wl::outputs::focused_output();
+        log::info!("focused output before locking: {focused:?}");
+        let input = config.input.clone();
+        // レーン数は拡大前の設定値で決める（主画面の大きさでレーン数が変わらないように）
+        let count = lanes::lane_count(input.band_width, input.pillar_width);
+        OverlayHost {
+            overlay: None,
+            lanes: LaneAllocator::new(count, u64::from(input.pillar_fade_ms), fastrand::Rng::new()),
+            primary: PrimaryTracker::new(config.display.primary.clone(), focused),
+            date: DateStyle::new(&config.appearance.date_format, locale),
+            input,
+            font: config.appearance.font.clone(),
+            last_keystroke_ms: None,
+            last: None,
+        }
+    }
+
+    /// GPU が使えるようになったら（ロックの前に）呼ぶ。シェーダー・フォント・アトラスを準備する。
+    /// 失敗したら重ね物なしで続ける（背景とパスワード入力は動く）。
+    pub fn attach_gpu(&mut self, gpu: &Gpu) {
+        match Overlay::new(gpu, &self.font, scene::needs_fallback_font(&self.date)) {
+            Ok(overlay) => self.overlay = Some(overlay),
+            Err(e) => log::warn!("overlay disabled: {e}"),
+        }
+    }
+
+    /// パスワードバッファが打鍵を受け付けたとき（`push_str` / `backspace` が `true`）に呼ぶ。
+    pub fn keystroke(&mut self, now_ms: u64) {
+        self.lanes.spawn(now_ms);
+        self.last_keystroke_ms = Some(now_ms);
+    }
+
+    /// 出力の一覧（出力名, description）を渡して主画面の添字を返す。一覧が変わったときだけ選び直す。
+    pub fn refresh_primary<'a, I>(&mut self, outputs: I) -> Option<usize>
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+        I::IntoIter: Clone,
+    {
+        let before = self.primary.primary();
+        let after = self.primary.update(outputs);
+        if after != before {
+            log::info!("overlay output index: {after:?}");
+            // 新しい主画面には最初から描き直す
+            self.last = None;
+        }
+        after
+    }
+
+    /// 出力 `index` の重ね物が動き続けている（毎フレーム描き直す）か:
+    /// 主画面で、柱が表示中・錠が震えている・解除のアニメーション中。
+    pub fn animating(&self, index: usize, machine: &Machine, now_ms: u64) -> bool {
+        if self.overlay.is_none() || self.primary.primary() != Some(index) {
+            return false;
+        }
+        let shaking = matches!(machine.phase(), Phase::Failed { .. })
+            && machine
+                .phase()
+                .elapsed_ms(now_ms)
+                .is_some_and(|ms| ms < anim::SHAKE_MS);
+        // 一番新しい柱が消えるまでは、どれかの柱が動いている
+        let pillars = self
+            .last_keystroke_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) < u64::from(self.input.pillar_fade_ms));
+        shaking || pillars || matches!(machine.phase(), Phase::Unlocking { .. })
+    }
+
+    /// 主画面の重ね物が、前に描いたときから変わったか（時刻・日付・状態・主画面）、動き続けているか。
+    /// `Tick` ごとに（`refresh_primary` の後で）呼び、`true` なら主画面を描き直す。
+    pub fn wants_frame(&self, machine: &Machine, now_ms: u64) -> bool {
+        let Some(index) = self.primary.primary() else {
+            return false;
+        };
+        if self.overlay.is_none() {
+            return false;
+        }
+        if self.animating(index, machine, now_ms) {
+            return true;
+        }
+        let Some(last) = &self.last else {
+            return true;
+        };
+        let wall = chrono::Local::now().fixed_offset();
+        last.phase != machine.phase()
+            || last.time_text != wall.format("%H:%M").to_string()
+            || last.date_text != self.date.format(&wall)
+    }
+
+    /// 出力 `index` が主画面なら重ね物を描く。描画先は current にしておき、背景は描いておく。
+    /// `size` は `Background::draw` に渡したのと同じ幅と高さ、`fade` は同じフェードの不透明度。
+    pub fn draw(
+        &mut self,
+        gpu: &Gpu,
+        index: usize,
+        size: (u32, u32),
+        machine: &Machine,
+        now_ms: u64,
+        fade: f32,
+    ) {
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        if self.primary.primary() != Some(index) {
+            return;
+        }
+        let wall = chrono::Local::now().fixed_offset();
+        let pillars = self.lanes.pillars(now_ms);
+        let scene = scene::build(
+            machine,
+            now_ms,
+            fade,
+            pillars,
+            &self.input,
+            &wall,
+            &self.date,
+        );
+        overlay.draw(gpu, size.0, size.1, &scene, &self.input);
+        self.last = Some(Drawn {
+            phase: machine.phase(),
+            time_text: scene.time_text,
+            date_text: scene.date_text,
+        });
+    }
 }
 
 #[cfg(test)]
