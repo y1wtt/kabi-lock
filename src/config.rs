@@ -38,8 +38,30 @@ impl Default for Appearance {
         Self {
             fade_in_ms: 1500,
             blur: 7.0,
-            date_format: "%m/%d".into(),
+            date_format: DEFAULT_DATE_FORMAT.into(),
         }
+    }
+}
+
+/// `appearance.date_format` の初期値。不正な書式のときもこれに戻す。
+pub const DEFAULT_DATE_FORMAT: &str = "%m/%d";
+
+/// chrono の strftime 形式として正しいか。
+///
+/// 不正な書式のまま `to_string()` すると panic するので、読み込み時に確かめる。
+pub fn is_valid_date_format(format: &str) -> bool {
+    chrono::format::StrftimeItems::new(format).parse().is_ok()
+}
+
+/// 不正な `date_format` を初期値に戻す。
+fn sanitize_date_format(appearance: &mut Appearance) {
+    if !is_valid_date_format(&appearance.date_format) {
+        log::warn!(
+            "appearance.date_format {:?} is not a valid strftime format; using {:?}",
+            appearance.date_format,
+            DEFAULT_DATE_FORMAT
+        );
+        appearance.date_format = DEFAULT_DATE_FORMAT.into();
     }
 }
 
@@ -130,8 +152,10 @@ impl std::error::Error for ConfigError {}
 pub fn parse(text: &str) -> Result<Loaded, ConfigError> {
     let value: toml::Value = toml::from_str(text).map_err(|e| ConfigError(e.to_string()))?;
     let mut unknown_keys = Vec::new();
-    let config = serde_ignored::deserialize(value, |path| unknown_keys.push(path.to_string()))
-        .map_err(|e| ConfigError(e.to_string()))?;
+    let mut config: Config =
+        serde_ignored::deserialize(value, |path| unknown_keys.push(path.to_string()))
+            .map_err(|e| ConfigError(e.to_string()))?;
+    sanitize_date_format(&mut config.appearance);
     Ok(Loaded {
         config,
         unknown_keys,
@@ -295,6 +319,27 @@ mod tests {
                 .iter()
                 .any(|k| k.contains("fade_out_ms"))
         );
+    }
+
+    #[test]
+    fn valid_date_formats_are_kept() {
+        for format in ["%m/%d", "%Y-%m-%d (%a)", "%-d %B", ""] {
+            assert!(is_valid_date_format(format), "{format}");
+            let text = format!("[appearance]\ndate_format = {format:?}");
+            assert_eq!(parse(&text).unwrap().config.appearance.date_format, format);
+        }
+    }
+
+    #[test]
+    fn invalid_date_format_falls_back_to_default() {
+        for format in ["%Q", "%", "%m/%"] {
+            assert!(!is_valid_date_format(format), "{format}");
+            let text = format!("[appearance]\ndate_format = {format:?}");
+            assert_eq!(
+                parse(&text).unwrap().config.appearance.date_format,
+                DEFAULT_DATE_FORMAT
+            );
+        }
     }
 
     #[test]
