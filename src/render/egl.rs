@@ -47,8 +47,8 @@ impl Gpu {
             .map_err(|e| format!("eglInitialize: {e}"))?;
         match Self::create_context(&egl, display) {
             Ok((config, context)) => {
+                // SAFETY: コンテキストは current。返る関数ポインタはこのコンテキストで使う。
                 let gl = Arc::new(unsafe {
-                    // SAFETY: コンテキストは current。返る関数ポインタはこのコンテキストで使う。
                     glow::Context::from_loader_function(|name| {
                         egl.get_proc_address(name)
                             .map_or(std::ptr::null(), |p| p as *const c_void)
@@ -240,6 +240,7 @@ mod tests {
     fn creates_a_surfaceless_context() {
         let conn = Connection::connect_to_env().expect("wayland");
         let gpu = Gpu::new(&conn).expect("gpu");
+        // SAFETY: Gpu::new が current にしたコンテキストへの読み取りだけ。
         let version = unsafe { gpu.gl().get_parameter_string(glow::VERSION) };
         assert!(version.contains("OpenGL ES 3"), "{version}");
     }
