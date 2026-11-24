@@ -217,6 +217,11 @@ impl Drop for GpuSurface {
     fn drop(&mut self) {
         // Instance<Static> は中身のない型なので、ここで作り直してよい
         let egl = egl::Instance::new(egl::Static);
+        // current のまま eglDestroySurface すると破棄が遅延し、wl_egl_window / wl_surface より
+        // 後まで残ってしまう。このサーフェスが current なら、先にサーフェスなしに戻す
+        if egl.get_current_surface(egl::DRAW) == Some(self.surface) {
+            let _ = egl.make_current(self.display, None, None, egl.get_current_context());
+        }
         if let Err(e) = egl.destroy_surface(self.display, self.surface) {
             warn!("eglDestroySurface failed: {e}");
         }
