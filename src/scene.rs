@@ -7,9 +7,6 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, FixedOffset, Locale};
 
-use crate::anim::{self, PillarFrame, ShacklePath};
-use crate::config;
-
 // ---------------------------------------------------------------------------
 // 日付の書式とロケール
 
@@ -268,9 +265,114 @@ fn cubic(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], t: f32) -> [f32
     ]
 }
 
+use crate::anim::{self, PillarFrame, ShacklePath};
+use crate::config::{self, Input};
+use crate::lanes::{self, Pillar};
+use crate::state::{Machine, Phase};
+
+// ---------------------------------------------------------------------------
+// 1 フレーム分の内容
+
+/// 錠。`path` はアイコン座標、`shake_x` は 1920x1080 基準の px（右が正）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LockDraw {
+    pub path: ShacklePath,
+    pub shake_x: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Scene {
+    /// 重ね物全体の不透明度。`fade_alpha * (1 - reveal_progress)`。
+    pub opacity: f32,
+    /// `HH:MM`。
+    pub time_text: String,
+    /// `date_format` で整形済みの日付。
+    pub date_text: String,
+    pub pillars: Vec<PillarDraw>,
+    /// 錠を出すときだけ `Some`。
+    pub lock: Option<LockDraw>,
+}
+
+/// 1 フレーム分の重ね物の内容を作る。
+///
+/// - `fade_alpha`: 背景と同じ黒からのフェードの不透明度（`anim::fade_alpha`）。
+/// - `pillars`: `LaneAllocator::pillars(now_ms)` の結果（`input.pillar_fade_ms` と同じ寿命で割り当てたもの）。
+/// - `wall`: 表示する時刻（呼び出し側で `Local::now().fixed_offset()`）。
+pub fn build(
+    machine: &Machine,
+    now_ms: u64,
+    fade_alpha: f32,
+    pillars: &[Pillar],
+    input: &Input,
+    wall: &DateTime<FixedOffset>,
+    date: &DateStyle,
+) -> Scene {
+    let phase = machine.phase();
+    let elapsed = phase.elapsed_ms(now_ms).unwrap_or(0.0);
+    let reveal = match phase {
+        Phase::Unlocking { .. } => anim::reveal_progress(elapsed),
+        Phase::Done => 1.0,
+        _ => 0.0,
+    };
+    let fade = if fade_alpha.is_nan() {
+        0.0
+    } else {
+        fade_alpha.clamp(0.0, 1.0)
+    };
+
+    let closed = anim::shackle_path(anim::shackle_at(0.0));
+    let lock = machine.lock_visible().then(|| match phase {
+        Phase::Unlocking { .. } => LockDraw {
+            path: anim::shackle_path(anim::shackle_at(elapsed)),
+            shake_x: 0.0,
+        },
+        Phase::Failed { .. } => LockDraw {
+            path: closed,
+            shake_x: anim::shake_offset(elapsed),
+        },
+        _ => LockDraw {
+            path: closed,
+            shake_x: 0.0,
+        },
+    });
+
+    // 柱は入力を受け付けている間だけ。失敗中は、失敗した後に打った柱だけを出す
+    // （Enter より前の柱は試作と同じく消す）。
+    let shown_since = match phase {
+        Phase::Idle => Some(0),
+        Phase::Failed { since_ms } => Some(since_ms),
+        _ => None,
+    };
+    let life_ms = input.pillar_fade_ms as f32;
+    let pillars = match shown_since {
+        Some(since) => pillars
+            .iter()
+            .filter(|p| p.started_ms >= since)
+            .filter_map(|p| {
+                let frame = anim::pillar_at(now_ms.saturating_sub(p.started_ms) as f32, life_ms)?;
+                Some(PillarDraw {
+                    x: lanes::lane_x(p.lane, input.band_width, input.pillar_width),
+                    width: input.pillar_width as f32,
+                    frame,
+                })
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
+    Scene {
+        opacity: fade * (1.0 - reveal),
+        time_text: wall.format("%H:%M").to_string(),
+        date_text: date.format(wall),
+        pillars,
+        lock,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{Event, FAIL_HOLD_MS};
     use chrono::TimeZone;
 
     fn close(a: f32, b: f32) -> bool {
@@ -461,5 +563,200 @@ mod tests {
             assert!(pts.len() >= 2);
             assert!(pts.iter().flatten().all(|v| v.is_finite()));
         }
+    }
+
+    // --- 1 フレーム分の内容
+
+    fn input() -> Input {
+        Input::default()
+    }
+
+    fn date() -> DateStyle {
+        DateStyle::new("%m/%d", Locale::POSIX)
+    }
+
+    fn scene(m: &Machine, now: u64, fade: f32, pillars: &[Pillar]) -> Scene {
+        build(
+            m,
+            now,
+            fade,
+            pillars,
+            &input(),
+            &jst(2026, 11, 24, 9, 5),
+            &date(),
+        )
+    }
+
+    fn failed_at(t: u64) -> Machine {
+        let mut m = Machine::new();
+        m.handle(Event::Submit { empty: false }, t);
+        m.handle(Event::PasswordChecked { ok: false }, t);
+        m
+    }
+
+    fn unlocking_at(t: u64) -> Machine {
+        let mut m = Machine::new();
+        m.handle(Event::U2fSucceeded, t);
+        m
+    }
+
+    #[test]
+    fn idle_shows_clock_and_date_without_lock() {
+        let s = scene(&Machine::new(), 0, 1.0, &[]);
+        assert_eq!(s.time_text, "09:05");
+        assert_eq!(s.date_text, "11/24");
+        assert_eq!(s.opacity, 1.0);
+        assert!(s.lock.is_none());
+        assert!(s.pillars.is_empty());
+    }
+
+    #[test]
+    fn opacity_follows_the_fade_in() {
+        assert_eq!(scene(&Machine::new(), 0, 0.0, &[]).opacity, 0.0);
+        assert!(close(scene(&Machine::new(), 0, 0.4, &[]).opacity, 0.4));
+        assert_eq!(scene(&Machine::new(), 0, 7.0, &[]).opacity, 1.0);
+        assert_eq!(scene(&Machine::new(), 0, f32::NAN, &[]).opacity, 0.0);
+    }
+
+    #[test]
+    fn opacity_is_fade_times_one_minus_reveal() {
+        let m = unlocking_at(1000);
+        let half = anim::REVEAL_START_MS + anim::REVEAL_MS / 2.0;
+        let s = scene(&m, 1000 + half as u64, 0.8, &[]);
+        assert!(close(s.opacity, 0.8 * 0.5));
+        let s = scene(&m, 1000 + anim::REVEAL_START_MS as u64, 1.0, &[]);
+        assert_eq!(s.opacity, 1.0);
+        let s = scene(&m, 1000 + crate::state::UNLOCK_TOTAL_MS, 1.0, &[]);
+        assert_eq!(s.opacity, 0.0);
+    }
+
+    #[test]
+    fn verifying_shows_the_closed_lock() {
+        let mut m = Machine::new();
+        m.handle(Event::Submit { empty: false }, 10);
+        let s = scene(&m, 500, 1.0, &[]);
+        let lock = s.lock.unwrap();
+        assert_eq!(lock.path, anim::shackle_path(anim::shackle_at(0.0)));
+        assert_eq!(lock.shake_x, 0.0);
+    }
+
+    #[test]
+    fn failure_shakes_the_closed_lock() {
+        let m = failed_at(100);
+        let at = 100 + (0.12 * anim::SHAKE_MS) as u64;
+        let s = scene(&m, at, 1.0, &[]);
+        let lock = s.lock.unwrap();
+        assert!(close(lock.shake_x, anim::shake_offset(at as f32 - 100.0)));
+        assert!(lock.shake_x < -9.0);
+        assert_eq!(lock.path, anim::shackle_path(anim::shackle_at(0.0)));
+        // 震え終わっても、入力待ちに戻るまでは錠を出したまま
+        let s = scene(&m, 100 + FAIL_HOLD_MS - 1, 1.0, &[]);
+        assert_eq!(s.lock.unwrap().shake_x, 0.0);
+    }
+
+    #[test]
+    fn lock_hides_again_after_the_failure_hold() {
+        let mut m = failed_at(100);
+        m.handle(Event::Tick, 100 + FAIL_HOLD_MS);
+        assert!(scene(&m, 100 + FAIL_HOLD_MS, 1.0, &[]).lock.is_none());
+    }
+
+    #[test]
+    fn unlocking_opens_the_shackle() {
+        let m = unlocking_at(1000);
+        let s = scene(&m, 1000 + 400, 1.0, &[]);
+        let lock = s.lock.unwrap();
+        assert_eq!(lock.path, anim::shackle_path(anim::shackle_at(400.0)));
+        assert_eq!(lock.shake_x, 0.0);
+    }
+
+    #[test]
+    fn pillars_use_lane_positions_and_the_pillar_animation() {
+        let pillars = [
+            Pillar {
+                lane: 0,
+                started_ms: 1000,
+            },
+            Pillar {
+                lane: 15,
+                started_ms: 1100,
+            },
+        ];
+        let s = scene(&Machine::new(), 1108, 1.0, &pillars);
+        assert_eq!(s.pillars.len(), 2);
+        assert_eq!(s.pillars[0].x, 8.0);
+        assert_eq!(s.pillars[1].x, 728.0);
+        assert_eq!(s.pillars[0].width, 32.0);
+        assert_eq!(s.pillars[0].frame, anim::pillar_at(108.0, 900.0).unwrap());
+        assert_eq!(s.pillars[1].frame, anim::pillar_at(8.0, 900.0).unwrap());
+    }
+
+    #[test]
+    fn expired_pillars_are_not_drawn() {
+        let pillars = [Pillar {
+            lane: 3,
+            started_ms: 0,
+        }];
+        assert!(
+            scene(&Machine::new(), 900, 1.0, &pillars)
+                .pillars
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn pillars_hide_while_verifying_and_unlocking() {
+        let pillars = [Pillar {
+            lane: 3,
+            started_ms: 0,
+        }];
+        let mut m = Machine::new();
+        m.handle(Event::Submit { empty: false }, 10);
+        assert!(scene(&m, 20, 1.0, &pillars).pillars.is_empty());
+        assert!(
+            scene(&unlocking_at(10), 20, 1.0, &pillars)
+                .pillars
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn after_a_failure_only_new_pillars_are_drawn() {
+        let pillars = [
+            Pillar {
+                lane: 1,
+                started_ms: 50,
+            },
+            Pillar {
+                lane: 2,
+                started_ms: 150,
+            },
+        ];
+        let s = scene(&failed_at(100), 200, 1.0, &pillars);
+        assert_eq!(s.pillars.len(), 1);
+        assert_eq!(s.pillars[0].x, lanes::lane_x(2, 768, 32));
+    }
+
+    #[test]
+    fn pillar_width_comes_from_the_config() {
+        let wide = Input {
+            pillar_width: 64,
+            ..Input::default()
+        };
+        let pillars = [Pillar {
+            lane: 0,
+            started_ms: 0,
+        }];
+        let s = build(
+            &Machine::new(),
+            10,
+            1.0,
+            &pillars,
+            &wide,
+            &jst(2026, 11, 24, 9, 5),
+            &date(),
+        );
+        assert_eq!(s.pillars[0].width, 64.0);
+        assert_eq!(s.pillars[0].x, lanes::lane_x(0, 768, 64));
     }
 }
