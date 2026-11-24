@@ -113,7 +113,7 @@ sway 向けの画面ロッカーを Rust で作る。swaylock-effects + 自作�
 | `render/background` | スクリーンショットのテクスチャ化、縮小ぼかし、フェード描画 | `glow` |
 | `render/overlay` | egui の準備（フォント・アトラス）と毎フレームの描画 | `egui_glow` |
 | `auth/password` | PAM でのパスワード確認（スレッド） | `pam-client` |
-| `auth/u2f` | pam_u2f でのタッチ待ち（スレッド、ループ） | `pam-client` |
+| `auth/u2f` | pam_u2f でのタッチ待ち（子プロセス `--u2f-helper` と監視スレッド、失敗したら 1 秒後に再起動） | `pam-client` |
 | `auth/keepassxc` | ロック前の DB ロック、解除後の解除要求 | `zbus` |
 | `main` | 起動順の制御、イベントループ、各モジュールの結線 | すべて |
 
@@ -198,7 +198,7 @@ primary = []
 
 [appearance]
 fade_in_ms = 1500
-blur = 7                 # ぼかしの強さ（縮小後のガウスの σ 相当）
+blur = 7                 # ぼかしの強さ（swaylock-effects の --effect-blur Nx5 の N。5 回のボックスぼかしの半径、7 で σ 約 9.7px。0.5〜50 に丸める）
 date_format = "%m/%d"    # chrono の strftime 形式。曜日などは LC_TIME のロケールに従う
 font = "Inter"           # 時計・日付のフォント（fontconfig のファミリー名）
 
