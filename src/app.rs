@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
     delegate_dispatch2, delegate_registry,
     output::{OutputHandler, OutputState},
     reexports::{
@@ -212,6 +212,24 @@ fn prepare_background(conn: &Connection, blur: f32) -> (Option<Gpu>, Option<Back
             log::warn!("background shaders failed, falling back to shm: {e}");
             (None, None)
         }
+    }
+}
+
+/// 論理サイズ全体を不透明領域にする（次の commit で反映される）。
+///
+/// GPU の EGL サーフェスは ARGB なので、伝えないとコンポジタが毎フレーム下と混ぜ合わせる。
+fn set_opaque_region(
+    compositor: &CompositorState,
+    surface: &wl_surface::WlSurface,
+    (width, height): (u32, u32),
+) {
+    match Region::new(compositor) {
+        Ok(region) => {
+            region.add(0, 0, width as i32, height as i32);
+            surface.set_opaque_region(Some(region.wl_region()));
+            // region は set_opaque_region の後に捨ててよい（ここで destroy される）
+        }
+        Err(e) => log::warn!("cannot create the opaque region: {e}"),
     }
 }
 
@@ -649,6 +667,10 @@ impl SessionLockHandler for App {
         let out = &mut self.outputs[index];
         if out.render.is_none() {
             out.render = Some(OutputRender::Shm(ShmBlack::new()));
+        }
+        // 大きさが変わることもあるので、configure のたびに設定し直す
+        if matches!(out.render, Some(OutputRender::Gpu(_))) {
+            set_opaque_region(&self.compositor, out.lock_surface.wl_surface(), out.size);
         }
         self.draw_output(index);
     }
