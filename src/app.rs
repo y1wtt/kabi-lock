@@ -284,6 +284,9 @@ pub fn run(config: Config) -> Result<(), AppError> {
 
     // 重ね物の状態（GL はまだ使わない）。ロック前にフォーカスしていた出力もここで sway に尋ねる
     let overlay = OverlayHost::new(&config);
+    // 錠・ぼかし・重ね物・ロックを外す時刻は、すべて状態機械が持つこの時間配分に従う
+    let unlock_timing = config.appearance.unlock_timing();
+    log::info!("unlock timing: {unlock_timing:?}");
     let mut app = App {
         conn: conn.clone(),
         qh: qh.clone(),
@@ -299,7 +302,7 @@ pub fn run(config: Config) -> Result<(), AppError> {
         outputs: Vec::new(),
         keyboards: Vec::new(),
         ctrl: false,
-        machine: Machine::new(),
+        machine: Machine::with_unlock_timing(unlock_timing),
         password: PasswordBuffer::new(),
         checker,
         u2f: None,
