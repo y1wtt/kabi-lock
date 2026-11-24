@@ -198,22 +198,37 @@ impl GpuSurface {
         self.size = (width, height);
     }
 
+    /// このサーフェスを current にする。失敗したら警告を出すだけ。
     pub fn make_current(&self, gpu: &Gpu) {
-        if let Err(e) = gpu.egl.make_current(
-            gpu.display,
-            Some(self.surface),
-            Some(self.surface),
-            Some(gpu.context),
-        ) {
-            warn!("eglMakeCurrent failed: {e}");
+        if let Err(e) = self.try_make_current(gpu) {
+            warn!("{e}");
         }
     }
 
-    /// 描いた内容を出す（wl_surface の commit も含む）。
+    /// このサーフェスを current にする。失敗を呼び出し側で扱うとき用。
+    pub fn try_make_current(&self, gpu: &Gpu) -> Result<(), String> {
+        gpu.egl
+            .make_current(
+                gpu.display,
+                Some(self.surface),
+                Some(self.surface),
+                Some(gpu.context),
+            )
+            .map_err(|e| format!("eglMakeCurrent failed: {e}"))
+    }
+
+    /// 描いた内容を出す（wl_surface の commit も含む）。失敗したら警告を出すだけ。
     pub fn swap(&self, gpu: &Gpu) {
-        if let Err(e) = gpu.egl.swap_buffers(gpu.display, self.surface) {
-            warn!("eglSwapBuffers failed: {e}");
+        if let Err(e) = self.try_swap(gpu) {
+            warn!("{e}");
         }
+    }
+
+    /// 描いた内容を出す（wl_surface の commit も含む）。失敗を呼び出し側で扱うとき用。
+    pub fn try_swap(&self, gpu: &Gpu) -> Result<(), String> {
+        gpu.egl
+            .swap_buffers(gpu.display, self.surface)
+            .map_err(|e| format!("eglSwapBuffers failed: {e}"))
     }
 }
 
