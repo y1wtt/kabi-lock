@@ -153,8 +153,6 @@ impl LockOutput {
 pub struct App {
     pub(crate) conn: Connection,
     pub(crate) qh: QueueHandle<App>,
-    /// Plan 3〜5 で見た目や認証の設定を読む。
-    #[allow(dead_code)]
     pub(crate) config: Config,
     pub(crate) registry: RegistryState,
     pub(crate) compositor: CompositorState,
