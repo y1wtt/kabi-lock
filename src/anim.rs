@@ -297,6 +297,6 @@ mod tests {
             0.5
         ));
         assert_eq!(reveal_progress(REVEAL_START_MS + REVEAL_MS), 1.0);
-        assert!(REVEAL_START_MS >= SHACKLE_MS);
+        const { assert!(REVEAL_START_MS >= SHACKLE_MS) };
     }
 }
