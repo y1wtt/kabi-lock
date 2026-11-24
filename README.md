@@ -312,6 +312,8 @@ kabi-lock は sway 向けの画面ロッカーです。ロックすると画面�
   読めない・壊れているときは警告を出して初期値になります）。全キーと初期値は
   `docs/config.example.toml`（インストール後は `/usr/share/kabi-lock/config.example.toml`）にあります。
   時計を出す画面は `display.primary` に出力名（`DP-10`）かモニターの説明文を並べて選びます。
+  解除のアニメーションの長さは `appearance.unlock_open_ms`（錠が開くまで、初期値 800）と
+  `appearance.unlock_reveal_ms`（ぼかしが晴れるまで、初期値 700）で変えられます（ミリ秒、上限 5000、0 で一瞬）。
 - **YubiKey**: `authfile` の場所は人ごとに違うので、PAM の設定は自動では入りません。
   `contrib/pam.d/kabi-lock-u2f` を `/etc/pam.d/` にコピーして直すか、
   `auth.u2f.pam_service` に既存の設定（例 `u2f-touch`）を指定します。この PAM サービスは
