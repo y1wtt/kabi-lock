@@ -6,6 +6,7 @@ pkgbase = kabi-lock-git
 	arch = x86_64
 	arch = aarch64
 	license = BSD-3-Clause
+	license = OFL-1.1
 	makedepends = cargo
 	makedepends = clang
 	makedepends = git
