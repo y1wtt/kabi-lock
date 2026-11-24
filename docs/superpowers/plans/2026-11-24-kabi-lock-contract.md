@@ -246,7 +246,9 @@ Plan 6 は `docs/config.example.toml` とその一致テスト、README の設�
 // src/auth/u2f.rs
 /// 子プロセス `kabi-lock --u2f-helper <service>`（/proc/self/exe）でタッチ待ちを 1 回ずつ行い、
 /// 監視スレッドで終了を待つ。成功したら AuthEvent::U2fSucceeded を 1 回送って終わる。
-/// 失敗したら 1 秒あけて子を起動し直す。PAM サービスのファイルがなければ None。
+/// 失敗したら 1 秒あけて子を起動し直す。ただし PAM サービスが入力を求めた（終了コード 3、
+/// 設定の誤り）ときは、faillock に失敗を積まないよう、そのロックの間は起動し直さない。
+/// PAM サービスのファイルがなければ None。
 pub fn spawn(service: String, events: calloop::channel::Sender<AuthEvent>) -> Option<U2fHandle>;
 pub struct U2fHandle { /* 監視スレッドと現在の子プロセス */ }
 impl U2fHandle {
