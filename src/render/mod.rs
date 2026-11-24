@@ -2,6 +2,7 @@
 
 pub mod background;
 pub mod egl;
+pub mod overlay;
 pub mod shm;
 
 /// 出力 1 つの描画手段。
