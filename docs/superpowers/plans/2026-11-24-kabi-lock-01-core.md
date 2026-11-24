@@ -28,7 +28,7 @@ Plan 2 以降は、前の計画が終わってから、その時点のクレー�
 
 - Rust edition 2024。`unsafe` は使わない（Plan 1 の範囲）。
 - ライセンス: BSD-3-Clause（著作権表記: `Copyright (c) 2026, yuga iwata`）。
-- コミットメッセージは Conventional Commits（`feat:` `fix:` `test:` `chore:` `docs:` など）。本文は英語。末尾に `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。
+- コミットメッセージは Conventional Commits（`feat:` `fix:` `test:` `chore:` `docs:` など）。本文は英語。末尾に、そのコミットを実際に書いたモデルの `Co-Authored-By` 行（例: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`）。各タスクのコミット例にある `Claude Opus 5.5` は、書いたモデルの名前に置き換える。
 - 1 コミットは原則 1 ファイル。`git commit` の前に必ず `git status` と `git diff` で変更を確認する。
 - コード中のコメントは日本語、ログメッセージは英語。
 - パスワードの内容はログやデバッグ出力に出さない（`Debug` を実装しない）。
