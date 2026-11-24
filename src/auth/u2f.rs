@@ -105,8 +105,13 @@ fn judge(authenticated: bool, refused_prompts: u32) -> Attempt {
 
 /// タッチ待ちを 1 回行う。
 fn touch_once(service: &str, user: &str) -> Attempt {
-    let Ok(mut ctx) = pam_client::Context::new(service, Some(user), TouchOnly::default()) else {
-        return Attempt::SetupFailed;
+    let mut ctx = match pam_client::Context::new(service, Some(user), TouchOnly::default()) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            // PAM のエラーの種類だけで、入力は含まない
+            debug!("u2f helper: pam_start failed: {e}");
+            return Attempt::SetupFailed;
+        }
     };
     let authenticated = ctx.authenticate(Flag::NONE).is_ok();
     judge(authenticated, ctx.conversation().refused_prompts)
