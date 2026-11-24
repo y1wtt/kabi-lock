@@ -94,8 +94,20 @@ impl Default for Input {
 /// 巨大な値を入れるとレーン数が膨らみ、打鍵ごとの割り当てが重くなるので丸める。
 pub const MAX_BAND_WIDTH: u32 = 1920;
 
-/// 帯と柱の幅を上限で丸める。
+/// `input.pillar_fade_ms` の上限。
+///
+/// 長すぎると、打つのをやめた後も長い間 主画面を毎フレーム描き続けるので丸める。
+pub const MAX_PILLAR_FADE_MS: u32 = 10_000;
+
+/// 帯と柱の幅、柱の消える時間を上限で丸める。
 fn clamp_input(input: &mut Input) {
+    if input.pillar_fade_ms > MAX_PILLAR_FADE_MS {
+        log::warn!(
+            "input.pillar_fade_ms {} is too large; using {MAX_PILLAR_FADE_MS}",
+            input.pillar_fade_ms
+        );
+        input.pillar_fade_ms = MAX_PILLAR_FADE_MS;
+    }
     if input.band_width > MAX_BAND_WIDTH {
         log::warn!(
             "input.band_width {} is too large; using {MAX_BAND_WIDTH}",
@@ -378,6 +390,20 @@ mod tests {
         let input = parse(text).unwrap().config.input;
         assert_eq!(input.band_width, MAX_BAND_WIDTH);
         assert_eq!(input.pillar_width, MAX_BAND_WIDTH);
+    }
+
+    #[test]
+    fn huge_pillar_fade_is_clamped() {
+        let text = "[input]\npillar_fade_ms = 4294967295";
+        let input = parse(text).unwrap().config.input;
+        assert_eq!(input.pillar_fade_ms, MAX_PILLAR_FADE_MS);
+        assert_eq!(MAX_PILLAR_FADE_MS, 10_000);
+        // 上限以下はそのまま
+        let input = parse("[input]\npillar_fade_ms = 2500")
+            .unwrap()
+            .config
+            .input;
+        assert_eq!(input.pillar_fade_ms, 2500);
     }
 
     #[test]
