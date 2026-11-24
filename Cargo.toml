@@ -8,6 +8,8 @@ repository = "https://github.com/y1wtt/kabi-lock"
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["unstable-locales"] }
+egui = "0.37"
+egui_glow = "0.37"
 env_logger = "0.11.12"
 fastrand = "2.5.0"
 glow = "0.17"
@@ -17,6 +19,7 @@ nix = { version = "0.32.0", default-features = false, features = ["user"] }
 pam-client = { version = "0.5.0", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_ignored = "0.1.14"
+skrifa = "0.44"
 smithay-client-toolkit = "0.21.1"
 swayipc = "4.0.0"
 toml = "1.2.2"
