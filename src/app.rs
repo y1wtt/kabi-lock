@@ -596,6 +596,8 @@ impl App {
             let removed = self.outputs.remove(index);
             log::info!("output removed: {}", removed.meta.label());
         }
+        // 添字が詰まったので、主画面の添字をすぐ選び直す（次に描くときまで古い添字を使わない。Plan 4）
+        self.primary_index(None);
     }
 
     /// キーを 1 回分処理する。
