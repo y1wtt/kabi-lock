@@ -222,8 +222,13 @@ pub fn build(/* 引数は Plan 4 で決める。Machine, now_ms, LaneAllocator, 
 // src/render/overlay.rs
 pub struct Overlay { /* egui::Context, egui_glow::Painter */ }
 impl Overlay {
-    /// Inter を埋め込みで登録し、必要なら fontconfig の日本語フォントを足す。
-    pub fn new(gpu: &Gpu, date_needs_fallback: bool) -> Result<Overlay, String>;
+    /// 時計・日付のフォントを選んで登録し、必要なら fontconfig の日本語フォントを足す。
+    /// フォントの選び方: fontconfig で `font_family`（設定の `appearance.font`）を探し、
+    /// 太さ 500（時計）と 400（日付）のファイルを読む。見つからない・読めない（egui が扱えない
+    /// 形式を含む）・fontconfig が使えない、のどれかのときは埋め込みの Inter を使う。
+    /// 選んだフォントと、埋め込みに戻した理由はログ（英語）に出す。
+    /// 候補の選び方と戻し方の判断は純粋な関数に分けてテストする。
+    pub fn new(gpu: &Gpu, font_family: &str, date_needs_fallback: bool) -> Result<Overlay, String>;
     /// 1920x1080 基準の配置を、出力の高さに合わせて拡大して描く。
     pub fn draw(&mut self, gpu: &Gpu, width: u32, height: u32, scene: &Scene, input: &crate::config::Input);
 }
@@ -232,6 +237,8 @@ impl Overlay {
 主画面の選び方は `config::select_primary(&config.display.primary, &outputs, focused)` を使い、
 `focused` は `swayipc` で取る（失敗したら `None`）。重ね物は主画面だけに描く。
 `date_format` は読み込み時に `StrftimeItems::new(fmt).parse()` で検証し、不正なら `%m/%d` に戻す。
+設定に `appearance.font: String`（初期値 `"Inter"`）を足すのは Plan 4（`config.rs` の変更とテストを含む）。
+Plan 6 は `docs/config.example.toml` とその一致テスト、README の設定の表に `font` を足す。
 
 ### Plan 5 が作るもの
 
