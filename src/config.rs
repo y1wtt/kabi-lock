@@ -147,8 +147,10 @@ pub fn config_path(xdg_config_home: Option<OsString>, home: Option<OsString>) ->
 
 /// 設定を読む。ファイルがない・読めない・壊れているときは初期値を返す（ロックは必ず続けるため）。
 pub fn load() -> Config {
-    let Some(path) = config_path(std::env::var_os("XDG_CONFIG_HOME"), std::env::var_os("HOME"))
-    else {
+    let Some(path) = config_path(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    ) else {
         return Config::default();
     };
     let text = match std::fs::read_to_string(&path) {
@@ -239,7 +241,12 @@ mod tests {
         assert_eq!(loaded.config.appearance.fade_in_ms, 1200);
         assert_eq!(loaded.unknown_keys.len(), 2);
         assert!(loaded.unknown_keys.iter().any(|k| k.contains("colour")));
-        assert!(loaded.unknown_keys.iter().any(|k| k.contains("fade_out_ms")));
+        assert!(
+            loaded
+                .unknown_keys
+                .iter()
+                .any(|k| k.contains("fade_out_ms"))
+        );
     }
 
     #[test]
