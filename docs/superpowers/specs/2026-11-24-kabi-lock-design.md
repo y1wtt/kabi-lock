@@ -2,7 +2,9 @@
 
 - 日付: 2026-11-24
 - 状態: 承認済み（実装前）
-- デザイン: https://claude.ai/artifact/Aa9QfmB37CVZbfbhsxBevM （Claude Design のキャンバス）
+- デザイン: `docs/design/`（画像と Claude Design の元データ。元のキャンバスは https://claude.ai/artifact/Aa9QfmB37CVZbfbhsxBevM で非公開）
+
+![ロック画面](../../design/images/lock-screen.png)
 
 ## 1. 目的
 
