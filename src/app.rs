@@ -700,9 +700,23 @@ impl CompositorHandler for App {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: i32,
+        surface: &wl_surface::WlSurface,
+        new_factor: i32,
     ) {
+        let Some(index) = self.output_index_of(surface) else {
+            return;
+        };
+        let out = &mut self.outputs[index];
+        let scale = new_factor.max(1);
+        if out.scale == scale {
+            return;
+        }
+        out.scale = scale;
+        log::debug!("buffer scale of {}: {scale}", out.meta.label());
+        // shm は論理サイズ・スケール 1 で描くので、描き直すのは GPU だけ
+        if matches!(out.render, Some(OutputRender::Gpu(_))) {
+            self.draw_output(index);
+        }
     }
 
     fn transform_changed(
@@ -721,12 +735,13 @@ impl CompositorHandler for App {
         surface: &wl_surface::WlSurface,
         _: u32,
     ) {
-        if let Some(out) = self
-            .outputs
-            .iter_mut()
-            .find(|o| o.lock_surface.wl_surface() == surface)
-        {
-            out.frame_pending = false;
+        let Some(index) = self.output_index_of(surface) else {
+            return;
+        };
+        self.outputs[index].frame_pending = false;
+        // フェード中・解除中は次のフレームを描く（時刻は Clock だけを使い、引数の時刻は使わない）
+        if self.background_animating() {
+            self.draw_output(index);
         }
     }
 
