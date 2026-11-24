@@ -379,6 +379,12 @@ pub struct PrimaryTracker {
     focused: Option<String>,
     seen: Vec<OutputInfo>,
     primary: Option<usize>,
+    /// 主画面の出力名（添字は出力が抜かれるとずれるので、同じ出力かは名前で見る）。
+    name: Option<String>,
+    /// 直前の `update` で主画面の出力名が替わったか。
+    changed: bool,
+    /// 替わる前の主画面の出力名。
+    previous: Option<String>,
 }
 
 impl PrimaryTracker {
@@ -389,6 +395,9 @@ impl PrimaryTracker {
             focused,
             seen: Vec::new(),
             primary: None,
+            name: None,
+            changed: false,
+            previous: None,
         }
     }
 
@@ -413,6 +422,17 @@ impl PrimaryTracker {
                 })
                 .collect();
             self.primary = config::select_primary(&self.rules, &self.seen, self.focused.as_deref());
+            let name = self
+                .primary
+                .and_then(|i| self.seen.get(i))
+                .map(|o| o.name.as_str());
+            self.changed = name != self.name.as_deref();
+            if self.changed {
+                let name = name.map(str::to_owned);
+                self.previous = std::mem::replace(&mut self.name, name);
+            }
+        } else {
+            self.changed = false;
         }
         self.primary
     }
@@ -420,6 +440,21 @@ impl PrimaryTracker {
     /// 最後に `update` で選んだ主画面。
     pub fn primary(&self) -> Option<usize> {
         self.primary
+    }
+
+    /// 直前の `update` で主画面の出力が替わったか。添字ではなく出力名で比べるので、
+    /// 主画面が抜かれて別の出力が同じ添字に詰めてきたときも替わったと分かる。
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    /// 直前の `update` で主画面が替わったとき、前の主画面の出力名（前がなかったら `None`）。
+    pub fn previous_name(&self) -> Option<&str> {
+        if self.changed {
+            self.previous.as_deref()
+        } else {
+            None
+        }
     }
 }
 
@@ -849,6 +884,28 @@ mod tests {
         let again = [("DP-10", ""), ("eDP-1", "")];
         assert_eq!(t.update(outs(&again)), Some(0));
         assert_eq!(t.update(outs(&[])), None);
+    }
+
+    #[test]
+    fn primary_change_is_reported_by_name_even_when_the_index_is_reused() {
+        let mut t = PrimaryTracker::new(vec!["DP-10".into()], None);
+        let both = [("DP-10", ""), ("eDP-1", "")];
+        assert_eq!(t.update(outs(&both)), Some(0));
+        assert!(t.changed());
+        assert_eq!(t.previous_name(), None);
+        // 一覧が同じなら替わっていない
+        assert_eq!(t.update(outs(&both)), Some(0));
+        assert!(!t.changed());
+        // 主画面（添字 0）が抜かれ、残りの出力が同じ添字 0 になっても、替わったと分かる
+        let laptop = [("eDP-1", "")];
+        assert_eq!(t.update(outs(&laptop)), Some(0));
+        assert!(t.changed());
+        assert_eq!(t.previous_name(), Some("DP-10"));
+        // 出力が増えても主画面が同じ出力なら替わっていない
+        let more = [("eDP-1", ""), ("HDMI-A-1", "")];
+        assert_eq!(t.update(outs(&more)), Some(0));
+        assert!(!t.changed());
+        assert_eq!(t.previous_name(), None);
     }
 
     #[test]
