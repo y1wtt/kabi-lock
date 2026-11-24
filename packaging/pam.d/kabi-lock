@@ -1,0 +1,9 @@
+#%PAM-1.0
+# PAM service used by kabi-lock to check your password.
+#
+# It reuses the stack of a normal console login, so the lock screen follows
+# the same policy as logging in (pam_faillock, pam_unix, ...).
+# `account` is needed as well: kabi-lock calls pam_acct_mgmt after a
+# successful pam_authenticate, and a service with no account line fails there.
+auth       include      login
+account    include      login
