@@ -99,6 +99,9 @@ pub(crate) struct LockOutput {
     pub(crate) scale: i32,
     /// GPU のフレームを 1 回でも出せたか。出せる前に失敗したら shm の黒に切り替える。
     pub(crate) presented: bool,
+    /// 最後に出したフレームが、アニメーションの終わった後の最終の絵か。
+    /// フェード中に画面が眠ってフレームコールバックが遅れても、起きたときに最終の絵を描くため。
+    pub(crate) settled: bool,
 }
 
 impl LockOutput {
@@ -137,6 +140,7 @@ impl LockOutput {
         let mut black = ShmBlack::new();
         black.draw(shm, wl_surface, self.size.0, self.size.1, qh);
         self.render = Some(OutputRender::Shm(black));
+        self.settled = true;
     }
 }
 
@@ -277,7 +281,9 @@ pub fn run(config: Config) -> Result<(), AppError> {
     handle
         .insert_source(Timer::from_duration(TICK), |_, _, app: &mut App| {
             app.handle_event(Event::Tick);
-            // 描き直しの連鎖が止まっている出力があれば再開する（解除の開始・画面の復帰）
+            // フレームコールバック待ちでない出力の描き直しを再開する（解除の開始など）。
+            // 眠っている出力はコールバック待ちのままなので、ここでは描かない。コンポジタが
+            // 溜めていたコールバックを届けたときに、frame() が settled を見て最終の絵を描く
             app.kick_animation();
             TimeoutAction::ToDuration(TICK)
         })
@@ -346,6 +352,8 @@ impl App {
                     height,
                     &self.qh,
                 );
+                // shm の黒は動かないので、いつも最終の絵
+                out.settled = true;
             }
             Some(OutputRender::Gpu(surface)) => {
                 let (Some(gpu), Some(background)) = (self.gpu.as_ref(), self.background.as_ref())
@@ -379,7 +387,10 @@ impl App {
                     out.frame_pending = true;
                 }
                 match surface.try_swap(gpu) {
-                    Ok(()) => out.presented = true,
+                    Ok(()) => {
+                        out.presented = true;
+                        out.settled = !animating;
+                    }
                     Err(e) => out.gpu_frame_failed(&self.shm, &self.qh, requested_frame, e),
                 }
             }
@@ -431,14 +442,20 @@ impl App {
         background::needs_frames(fade, self.machine.phase())
     }
 
-    /// アニメーション中なのに、フレームコールバック待ちでない GPU の出力を描き直す。
+    /// フレームコールバック待ちでない GPU の出力のうち、アニメーション中のものと、
+    /// まだ最終の絵を出していないものを描き直す。
     fn kick_animation(&mut self) {
-        if !self.background_animating() {
+        // release_lock の後は描かない
+        if self.exit.is_some() {
             return;
         }
+        let animating = self.background_animating();
         for index in 0..self.outputs.len() {
             let out = &self.outputs[index];
-            if !out.frame_pending && matches!(out.render, Some(OutputRender::Gpu(_))) {
+            if !out.frame_pending
+                && (animating || !out.settled)
+                && matches!(out.render, Some(OutputRender::Gpu(_)))
+            {
                 self.draw_output(index);
             }
         }
@@ -473,6 +490,7 @@ impl App {
             frame_pending: false,
             scale: 1,
             presented: false,
+            settled: false,
         });
     }
 
@@ -794,8 +812,13 @@ impl CompositorHandler for App {
             return;
         };
         self.outputs[index].frame_pending = false;
-        // フェード中・解除中は次のフレームを描く（時刻は Clock だけを使い、引数の時刻は使わない）
-        if self.background_animating() {
+        // release_lock の後は描かない
+        if self.exit.is_some() {
+            return;
+        }
+        // フェード中・解除中は次のフレームを描く（時刻は Clock だけを使い、引数の時刻は使わない）。
+        // 最終の絵をまだ出していなければ（フェードの途中で画面が眠っていたなど）それも描く
+        if self.background_animating() || !self.outputs[index].settled {
             self.draw_output(index);
         }
     }
