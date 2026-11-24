@@ -113,10 +113,12 @@ To try it without locking your real session, start a nested sway
 exits too; if the lock fails the nested sway stays open, and you can close its window.
 
 Idle and suspend integration is not part of kabi-lock. `kabi-lock` stays in the foreground
-until you unlock, so do not run it from `swayidle -w` for `before-sleep`: that would hold the
-sleep until you unlock. Locking on suspend is not supported: without `-w`
-(`swayidle before-sleep kabi-lock`) swayidle does not wait, so the screen may not be locked yet
-when the machine sleeps. An idle timeout works that way, for example `swayidle timeout 300 kabi-lock`.
+until you unlock, so do not run it from `swayidle -w` for `before-sleep`: with `-w` swayidle
+blocks until `kabi-lock` exits, and logind only delays the suspend for a short time
+(`InhibitDelayMaxSec`, 5 s by default), so the machine suspends anyway. Locking on suspend is not
+supported: without `-w` (`swayidle before-sleep kabi-lock`) swayidle does not wait, so the screen
+may not be locked yet when the machine sleeps. An idle timeout works that way, for example
+`swayidle timeout 300 kabi-lock`.
 
 ## Configuration
 
