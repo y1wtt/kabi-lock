@@ -814,15 +814,25 @@ mod supervisor_tests {
 
     #[test]
     fn a_command_that_cannot_start_is_retried() {
+        let calls = Arc::new(Mutex::new(0u32));
+        let make = {
+            let calls = Arc::clone(&calls);
+            move || {
+                *calls.lock().unwrap() += 1;
+                Command::new("/nonexistent/kabi-lock-helper")
+            }
+        };
         let (on_success, rx) = success_channel();
-        let mut handle = start(
-            test_service(),
-            || Command::new("/nonexistent/kabi-lock-helper"),
-            on_success,
-            SHORT,
-        )
-        .unwrap();
-        thread::sleep(Duration::from_millis(100));
+        let mut handle = start(test_service(), make, on_success, SHORT).unwrap();
+        // 起動できなくても、間をあけてもう一度起動を試みる
+        let deadline = Instant::now() + QUICK;
+        while *calls.lock().unwrap() < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "the helper was not started again"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
         handle.stop();
         assert!(rx.try_recv().is_err());
     }
