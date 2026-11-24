@@ -13,7 +13,10 @@ pub const DATE_WEIGHT: f32 = 400.0;
 
 /// `fc-list --format` に渡す書式。`parse_fc_list` はこの形を読む。
 pub const FC_LIST_FORMAT: &str =
-    "%{file}\t%{index}\t%{family}\t%{weight}\t%{slant}\t%{fontformat}\n";
+    "%{file}\t%{index}\t%{family}\t%{weight}\t%{slant}\t%{fontformat}\t%{width}\n";
+
+/// fontconfig の標準の幅（normal）。
+const NORMAL_WIDTH: f32 = 100.0;
 
 /// fontconfig の weight。可変フォントは範囲（例: `[0 210]`）になる。値は fontconfig の単位。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,6 +39,9 @@ pub struct FcFace {
     pub slant: i32,
     /// `TrueType`, `CFF` など。
     pub format: String,
+    /// 幅（fontconfig の値。100 が標準、75 が condensed）。可変フォントの範囲なら標準に一番近い値。
+    /// 一覧にないときは 100。
+    pub width: f32,
 }
 
 /// 使うと決めたフォントファイル。
@@ -108,6 +114,12 @@ fn parse_fc_line(line: &str) -> Option<FcFace> {
     let weight = parse_weight(fields.next()?.trim())?;
     let slant = fields.next()?.trim().parse().ok()?;
     let format = fields.next()?.trim().to_owned();
+    // 幅はないことがある（fontconfig が値を持たないフェイス）。そのときは標準とみなす
+    let width = match fields.next().and_then(|t| parse_weight(t.trim())) {
+        Some(FcWeight::Fixed(w)) => w,
+        Some(FcWeight::Range(lo, hi)) => NORMAL_WIDTH.clamp(lo, hi),
+        None => NORMAL_WIDTH,
+    };
     if file.is_empty() || families.is_empty() {
         return None;
     }
@@ -118,6 +130,7 @@ fn parse_fc_line(line: &str) -> Option<FcFace> {
         weight,
         slant,
         format,
+        width,
     })
 }
 
@@ -205,6 +218,11 @@ fn kind_rank(face: &FcFace) -> u8 {
     }
 }
 
+/// 標準の幅からの離れ具合（小さいほど良い）。condensed などより標準の幅を選ぶため。
+fn width_rank(face: &FcFace) -> u32 {
+    ((face.width - NORMAL_WIDTH).abs() * 10.0).round() as u32
+}
+
 /// フェイス 1 つで出せる、`desired` に一番近い太さ（CSS の weight）。
 fn provided_weight(face: &FcFace, desired: f32) -> f32 {
     match face.weight {
@@ -218,6 +236,7 @@ fn pick_one(faces: &[&FcFace], desired: f32) -> Option<FacePick> {
         let key = |f: &FcFace| {
             (
                 weight_preference(desired, provided_weight(f, desired)),
+                width_rank(f),
                 kind_rank(f),
             )
         };
@@ -239,8 +258,9 @@ fn pick_one(faces: &[&FcFace], desired: f32) -> Option<FacePick> {
 /// `family` の中から時計用（500）と日付用（400）のフェイスを選ぶ。
 ///
 /// 直立で、egui が読める形式（TrueType・CFF）のフェイスだけを使う。その太さがなければ
-/// 同じファミリーの一番近い太さ（`weight_preference` の順）を使う。ファミリーがない・使える
-/// フェイスがないときは `Err` で、呼び出し側は埋め込みの Inter を使う。
+/// 同じファミリーの一番近い太さ（`weight_preference` の順）を使う。同じ太さなら標準の幅に
+/// 近いもの（condensed より normal）を使う。ファミリーがない・使えるフェイスがないときは `Err` で、
+/// 呼び出し側は埋め込みの Inter を使う。
 pub fn pick_faces(family: &str, faces: &[FcFace]) -> Result<(FacePick, FacePick), Fallback> {
     let family = family.trim();
     if family.is_empty() {
@@ -292,6 +312,7 @@ mod tests {
             weight,
             slant: 0,
             format: "TrueType".into(),
+            width: 100.0,
         }
     }
 
@@ -320,6 +341,7 @@ mod tests {
                 weight: FcWeight::Range(0.0, 210.0),
                 slant: 0,
                 format: "TrueType".into(),
+                width: 100.0,
             }
         );
         let noto = parse_fc_list(NOTO);
@@ -448,6 +470,25 @@ mod tests {
         // 400 の静的なフェイスはないので、可変フォントで正確な太さにする
         assert_eq!(date.file, "/var.ttf");
         assert_eq!(date.variable_weight, Some(400.0));
+    }
+
+    #[test]
+    fn normal_width_wins_over_condensed_at_the_same_weight() {
+        // 幅は最後の列（fontconfig の値。100 が標準、75 が condensed）
+        let text = "\
+/f/TestSans-Condensed.ttf\t0\tTest Sans\t80\t0\tTrueType\t75
+/f/TestSans-Regular.ttf\t0\tTest Sans\t80\t0\tTrueType\t100
+/f/TestSans-MediumCondensed.ttf\t0\tTest Sans\t100\t0\tTrueType\t75
+/f/TestSans-Medium.ttf\t0\tTest Sans\t100\t0\tTrueType\t100
+";
+        let (clock, date) = pick_faces("Test Sans", &parse_fc_list(text)).unwrap();
+        assert_eq!(clock.file, "/f/TestSans-Medium.ttf");
+        assert_eq!(date.file, "/f/TestSans-Regular.ttf");
+        // 可変フォントの幅の範囲は、標準に一番近い値として読む
+        let text =
+            "/v.ttf\t0\tV\t80\t0\tTrueType\t[62 100]\n/w.ttf\t0\tW\t80\t0\tTrueType\t[50 87]\n";
+        let widths: Vec<f32> = parse_fc_list(text).iter().map(|f| f.width).collect();
+        assert_eq!(widths, [100.0, 87.0]);
     }
 
     #[test]
