@@ -374,13 +374,23 @@ pub fn run(config: Config) -> Result<(), AppError> {
         let meta = OutputMeta::from_info(app.output_state.info(&output).as_ref());
         log::info!("output {}: {}", meta.label(), meta.description);
     }
-    // 背景を用意してからロックする（撮影と EGL の準備は並行。ロックした後は撮れない）
-    let (gpu, background) = prepare_background(&conn, app.config.appearance.blur);
+    // 背景を用意してからロックする（撮影と EGL の準備は並行。ロックした後は撮れない）。
+    // 見た目の準備が panic しても、ロックせずに終わらないよう shm の黒で続ける
+    let blur = app.config.appearance.blur;
+    let (gpu, background) = contain("preparing the background", || {
+        prepare_background(&conn, blur)
+    })
+    .unwrap_or((None, None));
     app.gpu = gpu;
     app.background = background;
     // フォント・シェーダー・アトラスをロック前に用意する（失敗しても重ね物なしで続ける）
-    if let Some(gpu) = app.gpu.as_ref() {
-        app.overlay.attach_gpu(gpu);
+    if let Some(gpu) = app.gpu.as_ref()
+        && contain("preparing the overlay", || app.overlay.attach_gpu(gpu)).is_none()
+    {
+        // GL の状態が分からないので、背景も GPU も使わない（全出力を shm の黒で描く）
+        app.overlay.disable_gpu();
+        app.background = None;
+        app.gpu = None;
     }
     WaylandSource::new(conn, queue)
         .insert(handle)
