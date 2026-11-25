@@ -262,10 +262,14 @@ pub fn parse(text: &str) -> Result<Loaded, ConfigError> {
 }
 
 /// 設定ファイルの場所。`$XDG_CONFIG_HOME/kabi-lock/config.toml`、なければ `~/.config/...`。
+///
+/// XDG Base Directory の仕様どおり、相対パスの `XDG_CONFIG_HOME` は設定されていないものとして扱う。
+/// `HOME` も相対パスなら使わない（`None`）。
 pub fn config_path(xdg_config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    let base = match xdg_config_home.filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(home.filter(|v| !v.is_empty())?).join(".config"),
+    let absolute = |v: OsString| Some(PathBuf::from(v)).filter(|p| p.is_absolute());
+    let base = match xdg_config_home.and_then(absolute) {
+        Some(dir) => dir,
+        None => home.and_then(absolute)?.join(".config"),
     };
     Some(base.join("kabi-lock").join("config.toml"))
 }
@@ -595,6 +599,38 @@ mod tests {
     #[test]
     fn config_path_needs_some_base() {
         assert_eq!(config_path(None, None), None);
+    }
+
+    #[test]
+    fn relative_xdg_config_home_is_ignored() {
+        for relative in ["config", "./config", "../x", "~/.config"] {
+            assert_eq!(
+                config_path(
+                    Some(OsString::from(relative)),
+                    Some(OsString::from("/home/u"))
+                ),
+                Some(PathBuf::from("/home/u/.config/kabi-lock/config.toml")),
+                "{relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_home_is_ignored() {
+        assert_eq!(config_path(None, Some(OsString::from("home/u"))), None);
+        assert_eq!(
+            config_path(
+                Some(OsString::from("config")),
+                Some(OsString::from("home/u"))
+            ),
+            None
+        );
+        assert_eq!(config_path(None, Some(OsString::new())), None);
+        // XDG_CONFIG_HOME が絶対パスなら HOME は見ない
+        assert_eq!(
+            config_path(Some(OsString::from("/x")), Some(OsString::from("home/u"))),
+            Some(PathBuf::from("/x/kabi-lock/config.toml"))
+        );
     }
 
     /// 設定例の `docs/config.example.toml` が、実際のパーサーで警告なしに読めて、
