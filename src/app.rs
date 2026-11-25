@@ -138,10 +138,16 @@ impl LockOutput {
             "GPU frame for {} failed before the first frame, using shm: {error}",
             self.meta.label()
         );
-        // 先に GpuSurface を捨てる（EGL サーフェス → wl_egl_window の順に壊れる）
+        self.switch_to_shm(shm, qh);
+    }
+
+    /// 描画手段を shm の黒に替えて描く。
+    fn switch_to_shm(&mut self, shm: &Shm, qh: &QueueHandle<App>) {
+        // 先に GpuSurface を捨てる（EGL サーフェス → wl_egl_window の順に壊れる。
+        // lock_surface の wl_surface はまだ生きている）
         self.render = None;
         let wl_surface = self.lock_surface.wl_surface();
-        // 失敗した描画で buffer_scale が保留になっているかもしれない。shm は論理サイズ・スケール 1
+        // GPU の描画で buffer_scale が保留・設定済みかもしれない。shm は論理サイズ・スケール 1
         wl_surface.set_buffer_scale(1);
         let mut black = ShmBlack::new();
         black.draw(shm, wl_surface, self.size.0, self.size.1, qh);
@@ -563,19 +569,9 @@ impl App {
         log::error!("GPU rendering disabled after a panic; drawing black shm on every output");
         for out in &mut self.outputs {
             // configure 前の出力は、configure で shm の黒になる
-            if out.render.is_none() {
-                continue;
+            if out.render.is_some() {
+                out.switch_to_shm(&self.shm, &self.qh);
             }
-            // 先に GpuSurface を捨てる（EGL サーフェス → wl_egl_window の順に壊れる。
-            // lock_surface の wl_surface はまだ生きている）
-            out.render = None;
-            let wl_surface = out.lock_surface.wl_surface();
-            // GPU で設定した buffer_scale が残っている。shm は論理サイズ・スケール 1
-            wl_surface.set_buffer_scale(1);
-            let mut black = ShmBlack::new();
-            black.draw(&self.shm, wl_surface, out.size.0, out.size.1, &self.qh);
-            out.render = Some(OutputRender::Shm(black));
-            out.settled = true;
         }
         // EGL のコンテキストがあるうちに egui_glow の後片付けをする（フィールドの宣言順と同じ順番）
         contain("dropping the overlay's GL state", || {
