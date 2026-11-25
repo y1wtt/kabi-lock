@@ -192,9 +192,13 @@ out vec4 frag;
 void main() {
     // テクスチャは 1 行目（t = 0）が画面の上。画面の下端が v_uv.y = 0 なので上下を返す
     vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
-    // swaylock-effects の --effect-vignette 0.5:0.5 と同じ式（中央 1.0、四辺 0.5）
-    float vignette = clamp(0.5 + 0.5 * 16.0 * uv.x * uv.y * (1.0 - uv.x) * (1.0 - uv.y), 0.0, 1.0);
-    vec3 blurred = texture(u_blurred, uv).rgb * vignette * u_fade;
+    // 画面に合わせた楕円で中央 1.0 から角 0.5 へ smoothstep で落とす（四辺に沿った額縁にならない）
+    float d = clamp(length((uv - 0.5) * 2.0) / sqrt(2.0), 0.0, 1.0);
+    float vignette = 1.0 - 0.5 * smoothstep(0.0, 1.0, d);
+    // 暗い背景だと 8bit で輪状の縞が出るので、±0.5 階調のディザ（Interleaved Gradient Noise）を足す。
+    // u_fade を掛けるのでフェード 0 は真っ黒のまま、解除し切れば mix で消える
+    float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    vec3 blurred = (texture(u_blurred, uv).rgb * vignette + (noise - 0.5) / 255.0) * u_fade;
     vec3 sharp = texture(u_sharp, uv).rgb;
     frag = vec4(mix(blurred, sharp, u_reveal), 1.0);
 }
