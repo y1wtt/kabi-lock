@@ -9,11 +9,13 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use egui::epaint::ClippedShape;
 use egui::epaint::text::VariationCoords;
 use egui::text::LayoutJob;
 use egui::{
     Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, FontTweak,
-    LayerId, Mesh, Painter, Pos2, RawInput, Rect, Shape, Stroke, TextFormat, Vec2, pos2, vec2,
+    LayerId, Mesh, Painter, Pos2, RawInput, Rect, Shape, Stroke, TextFormat, TextureId, Vec2, pos2,
+    vec2,
 };
 use glow::HasContext as _;
 
@@ -56,6 +58,19 @@ const CHILD_POLL: Duration = Duration::from_millis(5);
 pub struct Overlay {
     ctx: Context,
     painter: egui_glow::Painter,
+    /// 錠を描き置くテクスチャ。最初に錠を出すときに作る。
+    lock_layer: Option<LockLayer>,
+}
+
+/// 錠を不透明で描き置くテクスチャと、その描画先。
+///
+/// 錠は図形が少し重なっているので、半透明のまま図形ごとに重ねると重なりが濃く出る。
+/// ここに不透明で描いてから 1 枚の絵として重ねれば、錠全体が同じ不透明度になる。
+/// テクスチャは egui_glow に登録してあり、`Painter::destroy` で消える。
+struct LockLayer {
+    fbo: glow::Framebuffer,
+    id: TextureId,
+    size: [u32; 2],
 }
 
 impl Overlay {
@@ -92,7 +107,11 @@ impl Overlay {
         let fallback =
             fallback.and_then(|(pattern, child)| fallback_font(&pattern, child, deadline));
         ctx.set_fonts(font_definitions(chosen, fallback));
-        let mut overlay = Overlay { ctx, painter };
+        let mut overlay = Overlay {
+            ctx,
+            painter,
+            lock_layer: None,
+        };
         overlay.warm_up();
         Ok(overlay)
     }
@@ -120,17 +139,41 @@ impl Overlay {
             )),
             ..Default::default()
         };
-        let out = self.ctx.run_pass(raw, |ctx| {
-            paint_scene(&ctx.layer_painter(LayerId::background()), &layout, scene);
+        let lock_rect = scene
+            .lock
+            .as_ref()
+            .map(|lock| lock_layer_rect(&layout, lock));
+        let lock_layer = lock_rect.and_then(|rect| {
+            let id = self.lock_layer_for(gpu, rect.size())?;
+            Some((id, rect))
         });
-        let primitives = self.ctx.tessellate(out.shapes, out.pixels_per_point);
+        let out = self.ctx.run_pass(raw, |ctx| {
+            paint_scene(
+                &ctx.layer_painter(LayerId::background()),
+                &layout,
+                scene,
+                lock_layer,
+            );
+        });
+        let ppp = out.pixels_per_point;
         let mut textures = out.textures_delta;
-        self.painter.paint_and_update_textures(
-            [width, height],
-            out.pixels_per_point,
-            &primitives,
-            &mut textures,
-        );
+        // 錠を描き置く前に字形のアトラスを送る（錠の図形もアトラスの白い画素を使う）
+        #[expect(clippy::iter_over_hash_type)] // 順番は関係ない
+        for (id, deltas) in textures.set.drain() {
+            for delta in deltas {
+                self.painter.set_texture(id, &delta);
+            }
+        }
+        if let (Some(lock), Some((_, rect))) = (&scene.lock, lock_layer) {
+            self.render_lock_layer(gpu, &layout, lock, rect, ppp);
+        }
+        let primitives = self.ctx.tessellate(out.shapes, ppp);
+        self.painter
+            .paint_primitives([width, height], ppp, &primitives);
+        #[expect(clippy::iter_over_hash_type)] // 順番は関係ない
+        for id in textures.free.drain() {
+            self.painter.free_texture(id);
+        }
         // egui が変えた状態のうち、背景の描画に響くものを既定に戻す
         // （SCISSOR_TEST は egui_glow が自分で戻す）
         unsafe {
@@ -155,11 +198,139 @@ impl Overlay {
         self.painter
             .paint_and_update_textures([1, 1], out.pixels_per_point, &[], &mut textures);
     }
+
+    /// `size` の大きさの描き置き先を用意して、egui のテクスチャ ID を返す。
+    /// 大きさが変わったら作り直す。作れなければ `None`（錠は図形を直接描く）。
+    fn lock_layer_for(&mut self, gpu: &Gpu, size: Vec2) -> Option<TextureId> {
+        let size = [size.x as u32, size.y as u32];
+        if let Some(layer) = &self.lock_layer
+            && layer.size == size
+        {
+            return Some(layer.id);
+        }
+        if let Some(old) = self.lock_layer.take() {
+            self.painter.free_texture(old.id);
+            // SAFETY: current な GL コンテキストで、自分が作った FBO を消すだけ。
+            unsafe { gpu.gl().delete_framebuffer(old.fbo) };
+        }
+        // SAFETY: current な GL コンテキストに対する、引数の正しい GL 呼び出しだけ。
+        let made = unsafe { new_lock_layer(gpu.gl(), size) };
+        match made {
+            Ok((texture, fbo)) => {
+                let id = self.painter.register_native_texture(texture);
+                self.lock_layer = Some(LockLayer { fbo, id, size });
+                Some(id)
+            }
+            Err(e) => {
+                log::warn!("cannot make the padlock layer, drawing it shape by shape: {e}");
+                None
+            }
+        }
+    }
+
+    /// 錠を不透明の白で描き置く。`rect` は画面上の位置（`lock_layer_rect`）。
+    fn render_lock_layer(
+        &mut self,
+        gpu: &Gpu,
+        layout: &Layout,
+        lock: &scene::LockDraw,
+        rect: Rect,
+        pixels_per_point: f32,
+    ) {
+        let Some(layer) = &self.lock_layer else {
+            return;
+        };
+        let (fbo, size) = (layer.fbo, layer.size);
+        let gl = gpu.gl();
+        // SAFETY: current な GL コンテキストに対する、引数の正しい GL 呼び出しだけ。
+        let previous = unsafe {
+            let previous = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.disable(glow::SCISSOR_TEST);
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            previous
+        };
+        let shapes = lock_shapes(layout, lock, Color32::WHITE, rect.min.to_vec2())
+            .into_iter()
+            .map(|shape| ClippedShape::new(Rect::EVERYTHING, shape))
+            .collect();
+        let primitives = self.ctx.tessellate(shapes, pixels_per_point);
+        self.painter
+            .paint_primitives(size, pixels_per_point, &primitives);
+        // SAFETY: 元の描画先（画面のサーフェスなど）に戻すだけ。
+        unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, previous) };
+    }
+}
+
+/// 錠の描き置き先（RGBA8 のテクスチャと FBO）を作る。
+///
+/// # Safety
+/// `gl` が current であること。
+unsafe fn new_lock_layer(
+    gl: &glow::Context,
+    [width, height]: [u32; 2],
+) -> Result<(glow::Texture, glow::Framebuffer), String> {
+    // SAFETY: 呼び出し側が current を保証する。引数はここで作ったものだけ。
+    unsafe {
+        let previous = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            width as i32,
+            height as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        // 画面と 1:1 で重ねるので補間しない
+        for (name, value) in [
+            (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
+            (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+        }
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        let fbo = match gl.create_framebuffer() {
+            Ok(fbo) => fbo,
+            Err(e) => {
+                gl.delete_texture(texture);
+                return Err(e);
+            }
+        };
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(texture),
+            0,
+        );
+        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, previous);
+        if status != glow::FRAMEBUFFER_COMPLETE {
+            gl.delete_framebuffer(fbo);
+            gl.delete_texture(texture);
+            return Err(format!("framebuffer incomplete: 0x{status:x}"));
+        }
+        Ok((texture, fbo))
+    }
 }
 
 impl Drop for Overlay {
     fn drop(&mut self) {
         // GL の後片付け。終了時にコンテキストがなくても GL 呼び出しが無視されるだけで害はない
+        // （錠のテクスチャは egui_glow に登録してあるので destroy で消える）
+        if let Some(layer) = self.lock_layer.take() {
+            // SAFETY: 自分が作った FBO を消すだけ。
+            unsafe { self.painter.gl().delete_framebuffer(layer.fbo) };
+        }
         self.painter.destroy();
     }
 }
@@ -475,8 +646,16 @@ fn fallback_font(
     Some(FontData::from_blob(Arc::new(bytes), face))
 }
 
-/// 1 フレーム分の図形を積む。描く順は 光の柱 → 時計 → 日付 → 錠（U 字 → 本体）。
-fn paint_scene(painter: &Painter, l: &Layout, scene: &Scene) {
+/// 1 フレーム分の図形を積む。描く順は 光の柱 → 時計 → 日付 → 錠。
+///
+/// `lock_layer` は錠を描き置いたテクスチャとその位置。あれば 1 枚の絵として重ね、
+/// なければ（作れなかったとき）図形を直接描く。
+fn paint_scene(
+    painter: &Painter,
+    l: &Layout,
+    scene: &Scene,
+    lock_layer: Option<(TextureId, Rect)>,
+) {
     for pillar in &scene.pillars {
         let [left, top, right, bottom] = scene::pillar_rect(l, pillar);
         let rect = Rect::from_min_max(pos2(left.round(), top), pos2(right.round(), bottom));
@@ -498,7 +677,18 @@ fn paint_scene(painter: &Painter, l: &Layout, scene: &Scene) {
         white(DATE_ALPHA * scene.opacity),
     );
     if let Some(lock) = &scene.lock {
-        painter.extend(lock_shapes(l, lock, white(scene.opacity), Vec2::ZERO));
+        match lock_layer {
+            // テクスチャの 1 行目は描き置いた絵の下端なので、uv の上下を返す
+            Some((id, rect)) => {
+                painter.add(Shape::image(
+                    id,
+                    rect,
+                    Rect::from_min_max(pos2(0.0, 1.0), pos2(1.0, 0.0)),
+                    white(scene.opacity),
+                ));
+            }
+            None => painter.extend(lock_shapes(l, lock, white(scene.opacity), Vec2::ZERO)),
+        }
     }
 }
 
@@ -581,9 +771,11 @@ fn paint_date(painter: &Painter, l: &Layout, text: &str, color: Color32) {
     painter.add(Shape::galley_with_override_text_color(pos, galley, color));
 }
 
-/// 錠の図形（U 字の丸い端・U 字・本体）。`shift` だけ左上へずらす。
+/// 錠の図形（U 字の丸い端・U 字・本体）。`shift` だけ左上へずらす（描き置き用）。
 ///
-/// 足は本体の上端で止めてあり（`scene::shackle_polyline`）、半透明でも本体越しに透けない。
+/// 足は本体の上端で止めてある（`scene::shackle_polyline`）。ただ丸い端と線、線と本体の
+/// 継ぎ目は少し重なるので、半透明のまま 1 つずつ重ねると重なりが濃く出る。
+/// 半透明で出すときは `LockLayer` に不透明で描いてから、1 枚の絵として重ねる。
 fn lock_shapes(l: &Layout, lock: &scene::LockDraw, color: Color32, shift: Vec2) -> Vec<Shape> {
     let unit = l.icon_unit;
     let origin = lock_origin(l, lock) - shift;
@@ -610,6 +802,24 @@ fn lock_shapes(l: &Layout, lock: &scene::LockDraw, color: Color32, shift: Vec2) 
 /// 錠のアイコン座標の原点（画面のピクセル）。震えの分だけ横にずれる。
 fn lock_origin(l: &Layout, lock: &scene::LockDraw) -> Pos2 {
     pos2(l.icon_origin[0] + lock.shake_x * l.scale, l.icon_origin[1])
+}
+
+/// 錠が解除中に動く範囲（アイコン座標）。U 字は跳ね上がりで y -4.75 まで、
+/// 回転で x 63.75 まで行く（線の太さ込み）。本体は x 14〜50、y 24〜52。
+const LOCK_LAYER_MIN: [f32; 2] = [12.0, -7.0];
+const LOCK_LAYER_MAX: [f32; 2] = [66.0, 54.0];
+
+/// 錠を描き置く矩形（画面の整数ピクセル）。大きさは配置だけで決まり、位置は震えで動く。
+/// 整数ピクセルにそろえるので、描き置いた絵を 1:1 で重ねられる（にじまない）。
+fn lock_layer_rect(l: &Layout, lock: &scene::LockDraw) -> Rect {
+    let unit = l.icon_unit;
+    let origin = lock_origin(l, lock);
+    // 線の縁のぼかし（1px）がはみ出さないよう 1px ずつ余白をとる
+    let width = ((LOCK_LAYER_MAX[0] - LOCK_LAYER_MIN[0]) * unit).ceil() + 2.0;
+    let height = ((LOCK_LAYER_MAX[1] - LOCK_LAYER_MIN[1]) * unit).ceil() + 2.0;
+    let left = (origin.x + LOCK_LAYER_MIN[0] * unit).floor() - 1.0;
+    let top = (origin.y + LOCK_LAYER_MIN[1] * unit).floor() - 1.0;
+    Rect::from_min_size(pos2(left, top), vec2(width, height))
 }
 
 /// 重ね物を描くのに要る状態一式（App が 1 つ持つ）。
@@ -1019,5 +1229,106 @@ mod tests {
             Color32::from_rgba_premultiplied(128, 128, 128, 128)
         );
         assert_eq!(white(2.0), Color32::WHITE);
+    }
+
+    #[test]
+    fn lock_layer_holds_the_whole_padlock() {
+        // 跳ね上がり・回転・震えのどの瞬間でも、錠（線の縁のぼかし 0.5px 込み）が描き置き先に収まる
+        for height in [720u32, 1080, 2160] {
+            let l = scene::layout(height * 16 / 9, height, 768);
+            let mut paths = vec![anim::shackle_path(anim::ShackleGeom::CLOSED)];
+            paths.extend((0..=800).step_by(10).map(|ms| {
+                anim::shackle_path(anim::shackle_at(ms as f32, &anim::UnlockTiming::default()))
+            }));
+            for path in paths {
+                for shake_x in [-12.0, -3.3, 0.0, 7.7, 12.0] {
+                    let lock = scene::LockDraw { path, shake_x };
+                    let rect = lock_layer_rect(&l, &lock);
+                    assert_eq!(rect.min, rect.min.round(), "{rect:?}");
+                    assert_eq!(rect.size(), rect.size().round(), "{rect:?}");
+                    for shape in lock_shapes(&l, &lock, Color32::WHITE, Vec2::ZERO) {
+                        let bounds = shape.visual_bounding_rect().expand(0.5);
+                        assert!(
+                            rect.contains_rect(bounds),
+                            "{height}p {lock:?}: {bounds:?} not in {rect:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 半透明の錠を描いて、図形の重なり（U 字の丸い端、足と本体の継ぎ目）が濃く出ないことを確かめる。
+    /// 今のセッションの Wayland 接続で EGL を作る（ロックはしない）。`cargo test -- --ignored` で手動実行。
+    #[test]
+    #[ignore = "needs a running Wayland compositor and a GPU"]
+    fn translucent_padlock_has_one_opacity() {
+        let conn = wayland_client::Connection::connect_to_env().expect("wayland");
+        let gpu = Gpu::new(&conn).expect("gpu");
+        let mut overlay = Overlay::new(&gpu, FontQueries::spawn("Inter", false)).expect("overlay");
+        let (w, h) = (1920u32, 1080u32);
+        const BG: u8 = 38;
+        // 白を不透明度 0.5 で 1 回だけ重ねた明るさ
+        let once = BG as f32 * 0.5 + 255.0 * 0.5;
+        let gl = gpu.gl();
+        for path in [
+            anim::shackle_path(anim::ShackleGeom::CLOSED),
+            anim::shackle_path(anim::shackle_at(600.0, &anim::UnlockTiming::default())),
+        ] {
+            let lock = scene::LockDraw { path, shake_x: 0.0 };
+            let scene = Scene {
+                opacity: 0.5,
+                time_text: String::new(),
+                date_text: String::new(),
+                pillars: vec![],
+                lock: Some(lock),
+            };
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            // SAFETY: current な GL コンテキストに対する、引数の正しい GL 呼び出しだけ。
+            unsafe {
+                let (texture, fbo) = new_lock_layer(gl, [w, h]).expect("target");
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                gl.viewport(0, 0, w as i32, h as i32);
+                let bg = BG as f32 / 255.0;
+                gl.clear_color(bg, bg, bg, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                overlay.draw(&gpu, w, h, &scene, &config::Input::default());
+                gl.read_pixels(
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(&mut pixels)),
+                );
+                assert_eq!(gl.get_error(), glow::NO_ERROR);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.delete_framebuffer(fbo);
+                gl.delete_texture(texture);
+            }
+            // read_pixels は下の行から並ぶ
+            let at = |x: u32, y: u32| pixels[(((h - 1 - y) * w + x) * 4) as usize];
+            let l = scene::layout(w, h, config::Input::default().band_width);
+            let rect = lock_layer_rect(&l, &lock);
+            let mut brightest = 0;
+            for y in rect.min.y as u32..rect.max.y as u32 {
+                for x in rect.min.x as u32..rect.max.x as u32 {
+                    brightest = brightest.max(at(x, y));
+                }
+            }
+            assert!(
+                (brightest as f32 - once).abs() <= 2.0,
+                "{lock:?}: brightest {brightest}, expected {once}"
+            );
+            // 本体の真ん中は 1 回だけ重ねた明るさ（錠が描けている）
+            let center = lock_origin(&l, &lock)
+                + vec2(
+                    anim::BODY_X + anim::BODY_W / 2.0,
+                    anim::BODY_Y + anim::BODY_H / 2.0,
+                ) * l.icon_unit;
+            let body = at(center.x as u32, center.y as u32) as f32;
+            assert!((body - once).abs() <= 2.0, "body {body}, expected {once}");
+        }
     }
 }
