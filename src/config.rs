@@ -23,6 +23,35 @@ pub struct Config {
 pub struct Display {
     /// 時計などを出す画面の候補（出力名またはモニターの説明文）。上から順に照合する。
     pub primary: Vec<String>,
+    /// GPU で描くか、Mesa のソフトウェアレンダラ（llvmpipe）で描くか。
+    pub renderer: Renderer,
+}
+
+/// `display.renderer`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Deserialize)]
+#[serde(from = "String")]
+pub enum Renderer {
+    /// EGL に任せる。Mesa はハードウェアのドライバーを読めなければ自分で llvmpipe に切り替える。
+    #[default]
+    Auto,
+    /// 起動時に `LIBGL_ALWAYS_SOFTWARE=1` を設定して llvmpipe を使う（ドライバーに問題があるとき）。
+    Software,
+}
+
+/// 知らない値は警告して `Auto` にする（書き間違い 1 つで設定全体を捨てないため）。
+impl From<String> for Renderer {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "auto" => Renderer::Auto,
+            "software" => Renderer::Software,
+            other => {
+                log::warn!(
+                    "display.renderer {other:?} is not \"auto\" or \"software\"; using \"auto\""
+                );
+                Renderer::Auto
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -386,6 +415,28 @@ mod tests {
     }
 
     #[test]
+    fn renderer_defaults_to_auto() {
+        assert_eq!(parse("").unwrap().config.display.renderer, Renderer::Auto);
+    }
+
+    #[test]
+    fn renderer_can_force_software() {
+        let c = parse("[display]\nrenderer = \"software\"").unwrap().config;
+        assert_eq!(c.display.renderer, Renderer::Software);
+        let c = parse("[display]\nrenderer = \"auto\"").unwrap().config;
+        assert_eq!(c.display.renderer, Renderer::Auto);
+    }
+
+    #[test]
+    fn unknown_renderer_falls_back_to_auto_and_keeps_other_keys() {
+        // 書き間違い 1 つで設定全体が初期値に戻らないように
+        let text = "[display]\nrenderer = \"sofware\"\n[appearance]\nfade_in_ms = 1000";
+        let c = parse(text).unwrap().config;
+        assert_eq!(c.display.renderer, Renderer::Auto);
+        assert_eq!(c.appearance.fade_in_ms, 1000);
+    }
+
+    #[test]
     fn unknown_keys_are_reported_not_rejected() {
         let text = r#"
             colour = "red"
@@ -608,6 +659,7 @@ mod tests {
                 "auth.u2f.enabled",
                 "auth.u2f.pam_service",
                 "display.primary",
+                "display.renderer",
                 "input.band_width",
                 "input.pillar_fade_ms",
                 "input.pillar_width",
