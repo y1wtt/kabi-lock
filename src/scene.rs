@@ -240,7 +240,30 @@ const EDGE_ON: f32 = 0.5;
 ///
 /// 短い足が長い足と重なる（真横から見た）ときは、頂点から長い足の下端までの 2 点を返す
 /// （行って戻る折れ線は線の継ぎ目が壊れるため）。
+///
+/// 本体に入る足は本体の上端で止める。解除中は錠ごと半透明になるので、本体の下に足を
+/// 描いておくと透けて見えてしまう。足は本体の上辺の平らな所（角丸の外）にあるので、
+/// 上端で止めても隙間はできない。
 pub fn shackle_polyline(path: &ShacklePath, segments_per_arc: usize) -> Vec<[f32; 2]> {
+    let mut points = full_shackle_polyline(path, segments_per_arc);
+    let last = points.len() - 1;
+    for i in [0, last] {
+        points[i] = stop_at_body_top(points[i]);
+    }
+    points
+}
+
+/// 足の下端が本体の中にあれば、本体の上端まで引き上げる。
+fn stop_at_body_top([x, y]: [f32; 2]) -> [f32; 2] {
+    let over_body = (anim::BODY_X..=anim::BODY_X + anim::BODY_W).contains(&x);
+    if over_body && y > anim::BODY_Y {
+        [x, anim::BODY_Y]
+    } else {
+        [x, y]
+    }
+}
+
+fn full_shackle_polyline(path: &ShacklePath, segments_per_arc: usize) -> Vec<[f32; 2]> {
     let apex = path.arc1[2];
     if (path.short_leg_top[0] - path.arc2[2][0]).abs() < EDGE_ON {
         return vec![apex, path.long_leg_bottom];
@@ -624,13 +647,14 @@ mod tests {
         let path = anim::shackle_path(ShackleGeom::CLOSED);
         let pts = shackle_polyline(&path, 8);
         assert_eq!(pts.len(), 2 + 8 * 2 + 1);
-        assert_eq!(pts[0], [22.0, 26.0]);
+        // 足の下端（26 と 40）は本体の上端（24）で止まる
+        assert_eq!(pts[0], [22.0, 24.0]);
         assert_eq!(pts[1], [22.0, 18.0]);
         assert!(pts.contains(&[32.0, 8.0]));
-        assert_eq!(*pts.last().unwrap(), [42.0, 40.0]);
+        assert_eq!(*pts.last().unwrap(), [42.0, 24.0]);
         for p in &pts {
             assert!((22.0 - 1e-3..=42.0 + 1e-3).contains(&p[0]));
-            assert!((8.0 - 1e-3..=40.0).contains(&p[1]));
+            assert!((8.0 - 1e-3..=24.0).contains(&p[1]));
         }
         // 同じ点が続かない（継ぎ目の計算が壊れないように）
         assert!(pts.windows(2).all(|w| w[0] != w[1]));
@@ -642,8 +666,30 @@ mod tests {
         let pts = shackle_polyline(&path, 8);
         assert_eq!(pts.len(), 2);
         assert!(close(pts[0][0], anim::LONG_LEG_X));
-        assert_eq!(pts[1], path.long_leg_bottom);
+        assert_eq!(pts[1], [path.long_leg_bottom[0], anim::BODY_Y]);
         assert!(pts[0][1] < pts[1][1]);
+    }
+
+    #[test]
+    fn shackle_polyline_never_enters_the_body() {
+        // 解除中は錠ごと半透明になるので、本体の下に足があると透けて見える
+        let body_x = anim::BODY_X..=anim::BODY_X + anim::BODY_W;
+        let mut geoms = vec![ShackleGeom::CLOSED];
+        geoms.extend(
+            (0..=800)
+                .step_by(10)
+                .map(|ms| anim::shackle_at(ms as f32, &UnlockTiming::default())),
+        );
+        for g in geoms {
+            let pts = shackle_polyline(&anim::shackle_path(g), 8);
+            for p in &pts {
+                assert!(
+                    !(body_x.contains(&p[0]) && p[1] > anim::BODY_Y),
+                    "{g:?}: {p:?} is inside the body"
+                );
+            }
+            assert!(pts.windows(2).all(|w| w[0] != w[1]), "{g:?}");
+        }
     }
 
     #[test]
