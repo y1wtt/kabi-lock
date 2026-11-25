@@ -239,7 +239,8 @@ Set `auth.u2f.enabled = false` to turn it off.
 
 - Before the screen locks, kabi-lock calls `lockAllDatabases` on KeePassXC (D-Bus) and does not wait
   for it. It then checks the Secret Service for up to 2 seconds; if a collection is still unlocked,
-  it shows a notification. The lock goes ahead either way. If KeePassXC is not running, nothing happens.
+  or the collections cannot be read so the lock cannot be confirmed, it shows a notification. The
+  lock goes ahead either way. If KeePassXC is not running, nothing happens.
 - After you unlock, it asks the Secret Service to unlock the collections that are locked, so
   KeePassXC shows its unlock dialog.
 
