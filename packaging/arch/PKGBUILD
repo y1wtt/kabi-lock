@@ -12,7 +12,7 @@ license=('BSD-3-Clause' 'OFL-1.1')
 depends=('fontconfig' 'gcc-libs' 'glibc' 'libglvnd' 'libxkbcommon' 'pam' 'wayland')
 makedepends=('cargo' 'clang' 'git')
 optdepends=('keepassxc: lock and unlock KeePassXC databases around the screen lock'
-            'mesa: GPU drivers for the EGL/OpenGL ES rendering (or a proprietary driver)'
+            'mesa: EGL/OpenGL ES rendering on the GPU or the llvmpipe software renderer'
             'pam-u2f: unlock with a YubiKey touch')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
