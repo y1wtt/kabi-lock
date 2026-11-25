@@ -114,6 +114,22 @@ fn clamp_unlock_timing(appearance: &mut Appearance) {
     }
 }
 
+/// `appearance.fade_in_ms` の上限。
+///
+/// 長すぎると、フェードの間ずっと全出力を毎フレーム描き続ける（ロック中 GPU を使い続ける）ので丸める。
+pub const MAX_FADE_IN_MS: u32 = 10_000;
+
+/// 黒からのフェードの長さを上限で丸める。
+fn clamp_fade_in(appearance: &mut Appearance) {
+    if appearance.fade_in_ms > MAX_FADE_IN_MS {
+        log::warn!(
+            "appearance.fade_in_ms {} is too large; using {MAX_FADE_IN_MS}",
+            appearance.fade_in_ms
+        );
+        appearance.fade_in_ms = MAX_FADE_IN_MS;
+    }
+}
+
 /// `appearance.font` の初期値。バイナリに埋め込んだフォントと同じファミリー。
 pub const DEFAULT_FONT: &str = "Inter";
 
@@ -266,6 +282,7 @@ pub fn parse(text: &str) -> Result<Loaded, ConfigError> {
             .map_err(|e| ConfigError(e.to_string()))?;
     sanitize_date_format(&mut config.appearance);
     clamp_unlock_timing(&mut config.appearance);
+    clamp_fade_in(&mut config.appearance);
     clamp_input(&mut config.input);
     Ok(Loaded {
         config,
@@ -274,10 +291,14 @@ pub fn parse(text: &str) -> Result<Loaded, ConfigError> {
 }
 
 /// 設定ファイルの場所。`$XDG_CONFIG_HOME/kabi-lock/config.toml`、なければ `~/.config/...`。
+///
+/// XDG Base Directory の仕様どおり、相対パスの `XDG_CONFIG_HOME` は設定されていないものとして扱う。
+/// `HOME` も相対パスなら使わない（`None`）。
 pub fn config_path(xdg_config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    let base = match xdg_config_home.filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(home.filter(|v| !v.is_empty())?).join(".config"),
+    let absolute = |v: OsString| Some(PathBuf::from(v)).filter(|p| p.is_absolute());
+    let base = match xdg_config_home.and_then(absolute) {
+        Some(dir) => dir,
+        None => home.and_then(absolute)?.join(".config"),
     };
     Some(base.join("kabi-lock").join("config.toml"))
 }
@@ -542,6 +563,25 @@ mod tests {
     }
 
     #[test]
+    fn huge_fade_in_is_clamped() {
+        let text = "[appearance]\nfade_in_ms = 4294967295";
+        let a = parse(text).unwrap().config.appearance;
+        assert_eq!(a.fade_in_ms, MAX_FADE_IN_MS);
+        assert_eq!(MAX_FADE_IN_MS, 10_000);
+        // 上限ちょうどと 0 はそのまま
+        let a = parse("[appearance]\nfade_in_ms = 10000")
+            .unwrap()
+            .config
+            .appearance;
+        assert_eq!(a.fade_in_ms, 10_000);
+        let a = parse("[appearance]\nfade_in_ms = 0")
+            .unwrap()
+            .config
+            .appearance;
+        assert_eq!(a.fade_in_ms, 0);
+    }
+
+    #[test]
     fn negative_unlock_timing_is_an_error() {
         assert!(parse("[appearance]\nunlock_open_ms = -1").is_err());
     }
@@ -610,6 +650,38 @@ mod tests {
     #[test]
     fn config_path_needs_some_base() {
         assert_eq!(config_path(None, None), None);
+    }
+
+    #[test]
+    fn relative_xdg_config_home_is_ignored() {
+        for relative in ["config", "./config", "../x", "~/.config"] {
+            assert_eq!(
+                config_path(
+                    Some(OsString::from(relative)),
+                    Some(OsString::from("/home/u"))
+                ),
+                Some(PathBuf::from("/home/u/.config/kabi-lock/config.toml")),
+                "{relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_home_is_ignored() {
+        assert_eq!(config_path(None, Some(OsString::from("home/u"))), None);
+        assert_eq!(
+            config_path(
+                Some(OsString::from("config")),
+                Some(OsString::from("home/u"))
+            ),
+            None
+        );
+        assert_eq!(config_path(None, Some(OsString::new())), None);
+        // XDG_CONFIG_HOME が絶対パスなら HOME は見ない
+        assert_eq!(
+            config_path(Some(OsString::from("/x")), Some(OsString::from("home/u"))),
+            Some(PathBuf::from("/x/kabi-lock/config.toml"))
+        );
     }
 
     /// 設定例の `docs/config.example.toml` が、実際のパーサーで警告なしに読めて、

@@ -294,18 +294,22 @@ impl PendingChild {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
+        let stdout = child.stdout.take();
         let (tx, rx) = mpsc::channel();
-        if let Some(mut out) = child.stdout.take() {
-            thread::spawn(move || {
+        let pending = PendingChild {
+            child: Some(child),
+            stdout: rx,
+        };
+        if let Some(mut out) = stdout {
+            // thread::spawn は起動に失敗すると panic する（ロック要求の前なので、ロックせずに終わってしまう）。
+            // 起動できなければ Err を返し、pending の Drop が子を止める
+            thread::Builder::new().spawn(move || {
                 let mut buf = Vec::new();
                 let _ = out.read_to_end(&mut buf);
                 let _ = tx.send(buf);
-            });
+            })?;
         }
-        Ok(PendingChild {
-            child: Some(child),
-            stdout: rx,
-        })
+        Ok(pending)
     }
 
     /// `deadline` までに正常に終われば、その標準出力を返す。
@@ -347,8 +351,9 @@ impl Drop for PendingChild {
             return;
         }
         let _ = child.kill();
-        // 止まっている子（ディスク待ちなど）の回収でロック要求を遅らせない
-        thread::spawn(move || {
+        // 止まっている子（ディスク待ちなど）の回収でロック要求を遅らせない。
+        // スレッドを起動できなければ回収しない（panic しない。ゾンビはプロセスの終わりで消える）
+        let _ = thread::Builder::new().spawn(move || {
             let _ = child.wait();
         });
     }
@@ -670,6 +675,13 @@ impl OverlayHost {
             Ok(overlay) => self.overlay = Some(overlay),
             Err(e) => log::warn!("overlay disabled: {e}"),
         }
+    }
+
+    /// 重ね物の GL の状態（egui_glow の painter）を捨て、以後は重ね物を描かない。
+    /// GPU の描画が panic して shm の黒に切り替えるときに、`Gpu` を捨てる前に呼ぶ。
+    pub fn disable_gpu(&mut self) {
+        self.overlay = None;
+        self.font_queries = None;
     }
 
     /// パスワードバッファが打鍵を受け付けたとき（`push_str` / `backspace` が `true`）に呼ぶ。

@@ -134,13 +134,17 @@ fn parse_fc_line(line: &str) -> Option<FcFace> {
     })
 }
 
+/// weight や width の値（`80` や `[0 210]`）を読む。
+///
+/// `nan` や `inf` は読めない値として扱う（NaN の範囲で `clamp` が panic するため）。
 fn parse_weight(text: &str) -> Option<FcWeight> {
+    let number = |v: &str| v.parse::<f32>().ok().filter(|n| n.is_finite());
     if let Some(range) = text.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
-        let mut ends = range.split_whitespace().map(|v| v.parse::<f32>().ok());
+        let mut ends = range.split_whitespace().map(number);
         let (lo, hi) = (ends.next()??, ends.next()??);
         return Some(FcWeight::Range(lo.min(hi), lo.max(hi)));
     }
-    text.parse().ok().map(FcWeight::Fixed)
+    number(text).map(FcWeight::Fixed)
 }
 
 /// fontconfig の index から、ファイルの中のフェイスの番号（egui の `FontData::index`、skrifa の
@@ -361,6 +365,39 @@ mod tests {
         let faces = parse_fc_list(text);
         assert_eq!(faces.len(), 1);
         assert_eq!(faces[0].file, "/b.ttf");
+    }
+
+    #[test]
+    fn non_finite_numbers_are_not_weights() {
+        for text in [
+            "nan",
+            "NaN",
+            "inf",
+            "-inf",
+            "infinity",
+            "[nan nan]",
+            "[0 nan]",
+            "[inf 210]",
+        ] {
+            assert_eq!(parse_weight(text), None, "{text}");
+        }
+        assert_eq!(parse_weight("80"), Some(FcWeight::Fixed(80.0)));
+        assert_eq!(parse_weight("[210 0]"), Some(FcWeight::Range(0.0, 210.0)));
+    }
+
+    #[test]
+    fn non_finite_weight_skips_the_line_and_width_becomes_normal() {
+        // weight が nan / inf の行は読めない行として飛ばす
+        let text = "/a.ttf\t0\tA\tnan\t0\tTrueType\t100\n\
+                    /b.ttf\t0\tB\t[nan nan]\t0\tTrueType\t100\n\
+                    /c.ttf\t0\tC\tinf\t0\tTrueType\t100\n";
+        assert!(parse_fc_list(text).is_empty());
+        // width が nan / inf なら標準の幅とみなす（[nan nan] で clamp が panic しない）
+        let text = "/a.ttf\t0\tA\t80\t0\tTrueType\tnan\n\
+                    /b.ttf\t0\tB\t80\t0\tTrueType\t[nan nan]\n\
+                    /c.ttf\t0\tC\t80\t0\tTrueType\tinf\n";
+        let widths: Vec<f32> = parse_fc_list(text).iter().map(|f| f.width).collect();
+        assert_eq!(widths, [NORMAL_WIDTH; 3]);
     }
 
     #[test]

@@ -106,6 +106,22 @@ pub fn texture_layout(format: wl_shm::Format) -> Option<TextureLayout> {
     })
 }
 
+/// スクリーンショットの大きさをテクスチャにできるか。
+///
+/// 幅・高さが 0 でなく i32 に収まり、stride が 4 の倍数で 1 行（幅 × 4 バイト）以上あり、
+/// 画素が最後の行の終わりまであること。掛け算は u64 で行う（u32 では桁あふれしうる）。
+pub fn valid_shot_size(width: u32, height: u32, stride: u32, pixels_len: usize) -> bool {
+    let (w, h, s) = (u64::from(width), u64::from(height), u64::from(stride));
+    if w == 0 || h == 0 || w > i32::MAX as u64 || h > i32::MAX as u64 {
+        return false;
+    }
+    if s % 4 != 0 || s < w * 4 {
+        return false;
+    }
+    let needed = s * (h - 1) + w * 4;
+    u64::try_from(pixels_len).is_ok_and(|len| len >= needed)
+}
+
 /// 黒 → ぼかしの進み具合（0.0〜1.0）。
 ///
 /// `first_configure_ms` は `App` が最初の configure で記録した時刻（出力ごとではなく全体で 1 つ）。
@@ -269,8 +285,7 @@ impl Background {
             return;
         };
         let (w, h, stride) = (shot.width, shot.height, shot.stride);
-        let needed = (stride as usize) * (h as usize).saturating_sub(1) + w as usize * 4;
-        if w == 0 || h == 0 || stride % 4 != 0 || stride < w * 4 || shot.pixels.len() < needed {
+        if !valid_shot_size(w, h, stride, shot.pixels.len()) {
             warn!(
                 "screenshot of {}: bad size {w}x{h} stride {stride}, using black",
                 shot.output_name
@@ -698,6 +713,27 @@ mod tests {
                 "{f:?}"
             );
         }
+    }
+
+    #[test]
+    fn shot_sizes_are_checked() {
+        assert!(valid_shot_size(3, 2, 12, 24));
+        // 最後の行は stride の詰め物がなくてよい
+        assert!(valid_shot_size(3, 2, 16, 16 + 12));
+        assert!(!valid_shot_size(3, 2, 16, 16 + 11));
+        assert!(!valid_shot_size(0, 2, 12, 24));
+        assert!(!valid_shot_size(3, 0, 12, 24));
+        assert!(!valid_shot_size(3, 2, 11, 24));
+        assert!(!valid_shot_size(3, 2, 14, 32));
+    }
+
+    #[test]
+    fn huge_shot_sizes_do_not_overflow() {
+        // u32 の width * 4 が桁あふれして 4 になる幅
+        assert!(!valid_shot_size(0x4000_0001, 1, 4, 4));
+        assert!(!valid_shot_size(u32::MAX, 1, u32::MAX - 3, usize::MAX));
+        // GL に i32 で渡せない高さ
+        assert!(!valid_shot_size(1, u32::MAX, 4, usize::MAX));
     }
 
     #[test]

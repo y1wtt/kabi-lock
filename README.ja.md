@@ -117,7 +117,7 @@ swayidle timeout 300 'pgrep -x kabi-lock || kabi-lock'
 |---|---|---|
 | `display.primary` | `[]` | 時計・日付・入力インジケーター・鍵アイコンを表示するモニター。リストの先頭から順に一致するものを探します（詳細は後述） |
 | `display.renderer` | `"auto"` | `"software"` にすると、GPU ではなく Mesa のソフトウェアレンダラ（llvmpipe）で描画します |
-| `appearance.fade_in_ms` | `1500` | 黒画面からぼかし背景へフェードインする時間（ミリ秒） |
+| `appearance.fade_in_ms` | `1500` | 黒画面からぼかし背景へフェードインする時間（ミリ秒。上限 `10000`） |
 | `appearance.blur` | `7` | ぼかしの強さ。スクリーンショットのピクセル単位での 5 パス・ボックスブラー半径（`0.5`〜`50` の範囲にクランプされます。負の値や NaN の場合は `7`） |
 | `appearance.date_format` | `"%m/%d"` | 時計の下に表示する日付のフォーマット（chrono の `strftime` 形式）。ロケール名は `LC_ALL`、`LC_TIME`、`LANG` の順で参照します。不正な書式の場合はデフォルト値にフォールバックします |
 | `appearance.font` | `"Inter"` | 時計と日付のフォントファミリー。fontconfig（`fc-list`）で検索し、時計にはウェイト `500`、日付には `400` に最も近いものを使用します。見つからない・読み込めない場合、または fontconfig がない・タイムアウト（約 1 秒）した場合は内蔵の Inter を使用します |
@@ -192,7 +192,7 @@ sudo cp /usr/share/kabi-lock/pam.d/kabi-lock-u2f /etc/pam.d/kabi-lock-u2f
 
 ### KeePassXC
 
-- 画面ロック前、kabi-lock は D-Bus 経由で KeePassXC の `lockAllDatabases` を呼び出します（完了は待機しません）。その後、最大 2 秒間 Secret Service を確かめ、まだ解除されたままのコレクションがあればデスクトップ通知を出します。どちらの場合もロックは進みます。KeePassXC が起動していなければ何もしません。
+- 画面ロック前、kabi-lock は D-Bus 経由で KeePassXC の `lockAllDatabases` を呼び出します（完了は待機しません）。その後、最大 2 秒間 Secret Service を確かめ、まだ解除されたままのコレクションがあるか、コレクションを読み取れずロックを確認できなければデスクトップ通知を出します。どちらの場合もロックは進みます。KeePassXC が起動していなければ何もしません。
 - 画面ロック解除後、ロックされているコレクションの解除を Secret Service 経由で要求し、KeePassXC にロック解除ダイアログを表示させます。
 
 `keepassxc.lock_before = false` と `keepassxc.unlock_after = false` を設定すると無効化できます。

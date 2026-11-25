@@ -35,6 +35,7 @@ renderer = "auto"
 [appearance]
 # Time to fade from black to the blurred screenshot, in milliseconds.
 # The clock and the other overlays fade in together.
+# Values above 10000 are clamped to 10000.
 fade_in_ms = 1500
 # Blur strength of the background: the radius, in screenshot pixels, of a
 # 5-pass box blur (the same look as swaylock-effects' --effect-blur 7x5, which

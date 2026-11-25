@@ -1,6 +1,7 @@
 //! Wayland のイベントループ。ロックを掛け、入力と認証の結果で状態を進め、解除する。
 
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use smithay_client_toolkit::{
@@ -137,10 +138,16 @@ impl LockOutput {
             "GPU frame for {} failed before the first frame, using shm: {error}",
             self.meta.label()
         );
-        // 先に GpuSurface を捨てる（EGL サーフェス → wl_egl_window の順に壊れる）
+        self.switch_to_shm(shm, qh);
+    }
+
+    /// 描画手段を shm の黒に替えて描く。
+    fn switch_to_shm(&mut self, shm: &Shm, qh: &QueueHandle<App>) {
+        // 先に GpuSurface を捨てる（EGL サーフェス → wl_egl_window の順に壊れる。
+        // lock_surface の wl_surface はまだ生きている）
         self.render = None;
         let wl_surface = self.lock_surface.wl_surface();
-        // 失敗した描画で buffer_scale が保留になっているかもしれない。shm は論理サイズ・スケール 1
+        // GPU の描画で buffer_scale が保留・設定済みかもしれない。shm は論理サイズ・スケール 1
         wl_surface.set_buffer_scale(1);
         let mut black = ShmBlack::new();
         black.draw(shm, wl_surface, self.size.0, self.size.1, qh);
@@ -188,6 +195,36 @@ pub struct App {
     pub(crate) exit: Option<Result<(), AppError>>,
 }
 
+/// `f` を呼ぶ。panic したらエラーをログに出して `None` を返す（panic を外へ伝えない）。
+///
+/// egui・フォント・GL のような見た目だけの処理に使う。ロックした後に panic で落ちると、
+/// sway が赤い画面のままロックを保ち、TTY からしか戻せなくなるため。
+pub(crate) fn contain<T>(what: &str, f: impl FnOnce() -> T) -> Option<T> {
+    match std::panic::catch_unwind(AssertUnwindSafe(f)) {
+        Ok(value) => Some(value),
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic payload".to_owned());
+            log::error!("{what} panicked: {message}");
+            None
+        }
+    }
+}
+
+/// GPU の 1 フレームの結果（`contain` の中から返す）。
+enum GpuFrame {
+    /// swap まで済んだ。
+    Presented,
+    /// EGL の呼び出しが失敗した。`requested_frame` はこの描画でフレームコールバックを要求したか。
+    Failed {
+        requested_frame: bool,
+        error: String,
+    },
+}
+
 /// スクリーンショット（別スレッド）と EGL の準備を並行して進め、背景を作る。
 ///
 /// EGL かシェーダーが使えなければ `(None, None)` で、全出力を shm の黒で描く。
@@ -201,9 +238,12 @@ fn prepare_background(conn: &Connection, blur: f32) -> (Option<Gpu>, Option<Back
             None
         }
     };
-    let shots = capture.join().unwrap_or_else(|_| {
-        log::warn!("screenshot thread panicked, background will be black");
-        Vec::new()
+    // 撮影のスレッドを起動できなかったときは、スクリーンショットなし（全出力の背景が黒）
+    let shots = capture.map_or_else(Vec::new, |capture| {
+        capture.join().unwrap_or_else(|_| {
+            log::warn!("screenshot thread panicked, background will be black");
+            Vec::new()
+        })
     });
     let Some(gpu) = gpu else {
         return (None, None);
@@ -222,6 +262,16 @@ fn prepare_background(conn: &Connection, blur: f32) -> (Option<Gpu>, Option<Back
     }
 }
 
+/// 論理サイズ × buffer_scale のバッファの画素数。
+///
+/// 大きさはコンポジタから来る。wl_egl_window や GL には i32 で渡すので、掛け算が桁あふれするか
+/// i32 に収まらなければ `None`（呼び出し側は shm の黒にする）。
+fn buffer_size((width, height): (u32, u32), scale: i32) -> Option<(u32, u32)> {
+    let scale = u32::try_from(scale.max(1)).ok()?;
+    let scaled = |v: u32| v.checked_mul(scale).filter(|v| i32::try_from(*v).is_ok());
+    Some((scaled(width)?, scaled(height)?))
+}
+
 /// 論理サイズ全体を不透明領域にする（次の commit で反映される）。
 ///
 /// GPU の EGL サーフェスは ARGB なので、伝えないとコンポジタが毎フレーム下と混ぜ合わせる。
@@ -232,7 +282,9 @@ fn set_opaque_region(
 ) {
     match Region::new(compositor) {
         Ok(region) => {
-            region.add(0, 0, width as i32, height as i32);
+            // i32 に収まらない大きさは i32::MAX にする（不透明領域はサーフェスの外が切り捨てられる）
+            let clamp = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+            region.add(0, 0, clamp(width), clamp(height));
             surface.set_opaque_region(Some(region.wl_region()));
             // region は set_opaque_region の後に捨ててよい（ここで destroy される）
         }
@@ -343,13 +395,23 @@ pub fn run(config: Config) -> Result<(), AppError> {
         let meta = OutputMeta::from_info(app.output_state.info(&output).as_ref());
         log::info!("output {}: {}", meta.label(), meta.description);
     }
-    // 背景を用意してからロックする（撮影と EGL の準備は並行。ロックした後は撮れない）
-    let (gpu, background) = prepare_background(&conn, app.config.appearance.blur);
+    // 背景を用意してからロックする（撮影と EGL の準備は並行。ロックした後は撮れない）。
+    // 見た目の準備が panic しても、ロックせずに終わらないよう shm の黒で続ける
+    let blur = app.config.appearance.blur;
+    let (gpu, background) = contain("preparing the background", || {
+        prepare_background(&conn, blur)
+    })
+    .unwrap_or((None, None));
     app.gpu = gpu;
     app.background = background;
     // フォント・シェーダー・アトラスをロック前に用意する（失敗しても重ね物なしで続ける）
-    if let Some(gpu) = app.gpu.as_ref() {
-        app.overlay.attach_gpu(gpu);
+    if let Some(gpu) = app.gpu.as_ref()
+        && contain("preparing the overlay", || app.overlay.attach_gpu(gpu)).is_none()
+    {
+        // GL の状態が分からないので、背景も GPU も使わない（全出力を shm の黒で描く）
+        app.overlay.disable_gpu();
+        app.background = None;
+        app.gpu = None;
     }
     WaylandSource::new(conn, queue)
         .insert(handle)
@@ -445,49 +507,99 @@ impl App {
                     return;
                 };
                 let scale = out.scale.max(1);
-                let (buffer_width, buffer_height) = (width * scale as u32, height * scale as u32);
-                if surface.size() != (buffer_width, buffer_height) {
-                    surface.resize(buffer_width, buffer_height);
-                }
-                if let Err(e) = surface.try_make_current(gpu) {
-                    out.gpu_frame_failed(&self.shm, &self.qh, false, e);
+                let Some((buffer_width, buffer_height)) = buffer_size((width, height), scale)
+                else {
+                    // 桁あふれさせずに shm の黒にする（GPU では描けない大きさ）
+                    log::warn!(
+                        "GPU buffer for {} would be too large ({width}x{height} at scale {scale}), using shm",
+                        out.meta.label()
+                    );
+                    out.switch_to_shm(&self.shm, &self.qh);
                     return;
-                }
-                background.draw(
-                    gpu,
-                    &out.meta.name,
-                    buffer_width,
-                    buffer_height,
-                    fade,
-                    reveal,
-                );
-                // 主画面なら時計・日付・光の柱・錠を重ねる（Plan 4）
-                self.overlay.draw(
-                    gpu,
-                    index,
-                    (buffer_width, buffer_height),
-                    &self.machine,
-                    now,
-                    fade,
-                );
-                let wl_surface = out.lock_surface.wl_surface();
-                // buffer_scale とフレームコールバックは、swap の commit で一緒に反映される
-                wl_surface.set_buffer_scale(scale);
-                let requested_frame = animating && !out.frame_pending;
-                if requested_frame {
-                    wl_surface.frame(&self.qh, FrameCallbackData(wl_surface.clone()));
-                    out.frame_pending = true;
-                }
-                match surface.try_swap(gpu) {
-                    Ok(()) => {
+                };
+                let overlay = &mut self.overlay;
+                let machine = &self.machine;
+                let qh = &self.qh;
+                // egui・フォント・GL の panic でロックごと落ちないよう、GPU の処理をまとめて包む
+                let frame = contain("GPU frame", || {
+                    if surface.size() != (buffer_width, buffer_height) {
+                        surface.resize(buffer_width, buffer_height);
+                    }
+                    if let Err(error) = surface.try_make_current(gpu) {
+                        return GpuFrame::Failed {
+                            requested_frame: false,
+                            error,
+                        };
+                    }
+                    background.draw(
+                        gpu,
+                        &out.meta.name,
+                        buffer_width,
+                        buffer_height,
+                        fade,
+                        reveal,
+                    );
+                    // 主画面なら時計・日付・光の柱・錠を重ねる（Plan 4）
+                    overlay.draw(
+                        gpu,
+                        index,
+                        (buffer_width, buffer_height),
+                        machine,
+                        now,
+                        fade,
+                    );
+                    let wl_surface = out.lock_surface.wl_surface();
+                    // buffer_scale とフレームコールバックは、swap の commit で一緒に反映される
+                    wl_surface.set_buffer_scale(scale);
+                    let requested_frame = animating && !out.frame_pending;
+                    if requested_frame {
+                        wl_surface.frame(qh, FrameCallbackData(wl_surface.clone()));
+                        out.frame_pending = true;
+                    }
+                    match surface.try_swap(gpu) {
+                        Ok(()) => GpuFrame::Presented,
+                        Err(error) => GpuFrame::Failed {
+                            requested_frame,
+                            error,
+                        },
+                    }
+                });
+                match frame {
+                    Some(GpuFrame::Presented) => {
                         out.presented = true;
                         out.settled = !animating;
                     }
-                    Err(e) => out.gpu_frame_failed(&self.shm, &self.qh, requested_frame, e),
+                    Some(GpuFrame::Failed {
+                        requested_frame,
+                        error,
+                    }) => out.gpu_frame_failed(&self.shm, &self.qh, requested_frame, error),
+                    // 以後は GPU を使わない（全出力を shm の黒にする）
+                    None => self.disable_gpu(),
                 }
             }
             None => {}
         }
+    }
+
+    /// GPU の描画が panic したときの後始末。以後はロックが終わるまで GPU を使わない。
+    ///
+    /// 全出力の描画手段を shm の黒に替えて描き、重ね物の GL の状態・背景・EGL を捨てる。
+    /// `gpu` が `None` になるので、後から挿された出力も `try_gpu_render` で shm の黒になる。
+    /// パスワードの入力と認証は描画に依存しないので、このまま続けられる。
+    fn disable_gpu(&mut self) {
+        log::error!("GPU rendering disabled after a panic; drawing black shm on every output");
+        for out in &mut self.outputs {
+            // configure 前の出力は、configure で shm の黒になる
+            if out.render.is_some() {
+                out.switch_to_shm(&self.shm, &self.qh);
+            }
+        }
+        // EGL のコンテキストがあるうちに egui_glow の後片付けをする（フィールドの宣言順と同じ順番）
+        contain("dropping the overlay's GL state", || {
+            self.overlay.disable_gpu()
+        });
+        self.background = None;
+        self.gpu = None;
     }
 
     /// 主画面を描き直す。フレームコールバック待ちなら、そのコールバックで描かれるので何もしない。
@@ -533,8 +645,16 @@ impl App {
         if out.render.is_some() {
             return;
         }
-        let scale = out.scale.max(1) as u32;
-        let (width, height) = (out.size.0 * scale, out.size.1 * scale);
+        let Some((width, height)) = buffer_size(out.size, out.scale) else {
+            log::warn!(
+                "GPU surface for {} would be too large ({}x{} at scale {}), using shm",
+                out.meta.label(),
+                out.size.0,
+                out.size.1,
+                out.scale
+            );
+            return;
+        };
         match GpuSurface::new(gpu, out.lock_surface.wl_surface(), width, height) {
             Ok(surface) => {
                 log::debug!("GPU surface for {}: {width}x{height}", out.meta.label());
@@ -1068,6 +1188,52 @@ mod tests {
             AppError::Other("event loop failed".into()).to_string(),
             "event loop failed"
         );
+    }
+
+    #[test]
+    fn contain_returns_the_value_without_a_panic() {
+        assert_eq!(contain("test", || 42), Some(42));
+    }
+
+    #[test]
+    fn contain_turns_a_panic_into_none() {
+        assert_eq!(contain("test", || -> u32 { panic!("boom") }), None);
+        let name = String::from("output");
+        assert_eq!(contain("test", || -> u32 { panic!("{name} failed") }), None);
+        // panic の後も、包んだ処理が変えた状態はそのまま使える
+        let mut drawn = 0;
+        assert_eq!(
+            contain("test", || {
+                drawn += 1;
+                panic!("after the first step")
+            }),
+            None::<()>
+        );
+        assert_eq!(drawn, 1);
+    }
+
+    #[test]
+    fn buffer_size_multiplies_by_the_scale() {
+        assert_eq!(buffer_size((1920, 1080), 1), Some((1920, 1080)));
+        assert_eq!(buffer_size((1920, 1080), 2), Some((3840, 2160)));
+        // スケール 0 以下は 1 とみなす
+        assert_eq!(buffer_size((1920, 1080), 0), Some((1920, 1080)));
+        assert_eq!(buffer_size((1920, 1080), -3), Some((1920, 1080)));
+        assert_eq!(
+            buffer_size((i32::MAX as u32, 1), 1),
+            Some((i32::MAX as u32, 1))
+        );
+    }
+
+    #[test]
+    fn buffer_size_rejects_overflow() {
+        // u32 で桁あふれする
+        assert_eq!(buffer_size((u32::MAX, 1080), 2), None);
+        assert_eq!(buffer_size((1920, 0x8000_0000), 2), None);
+        assert_eq!(buffer_size((1920, 1080), i32::MAX), None);
+        // u32 には収まるが i32 には収まらない
+        assert_eq!(buffer_size((0x8000_0000, 1080), 1), None);
+        assert_eq!(buffer_size((0x4000_0000, 1080), 2), None);
     }
 
     #[test]
