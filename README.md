@@ -142,7 +142,7 @@ named by `auth.pam_service` does not exist, kabi-lock refuses to lock (exit code
 | Key | Default | Meaning |
 |---|---|---|
 | `display.primary` | `[]` | Monitors that get the clock, date, input bar and padlock, tried in order (see below) |
-| `appearance.fade_in_ms` | `1500` | Fade from black to the blurred background, in ms |
+| `appearance.fade_in_ms` | `1500` | Fade from black to the blurred background, in ms (clamped to 10000) |
 | `appearance.blur` | `7` | Blur strength: radius of a 5-pass box blur in screenshot pixels (clamped to 0.5-50; negative or NaN becomes 7) |
 | `appearance.date_format` | `"%m/%d"` | Date under the clock, chrono strftime format; names follow `LC_ALL`, then `LC_TIME`, then `LANG`. An invalid format falls back to the default |
 | `appearance.font` | `"Inter"` | Font family for the clock and date. Looked up with fontconfig (`fc-list`): the weight nearest 500 for the clock and 400 for the date. If the family is not found or unreadable, or fontconfig is missing or too slow (about 1 s), the built-in Inter is used |
