@@ -671,6 +671,13 @@ impl OverlayHost {
         }
     }
 
+    /// 重ね物の GL の状態（egui_glow の painter）を捨て、以後は重ね物を描かない。
+    /// GPU の描画が panic して shm の黒に切り替えるときに、`Gpu` を捨てる前に呼ぶ。
+    pub fn disable_gpu(&mut self) {
+        self.overlay = None;
+        self.font_queries = None;
+    }
+
     /// パスワードバッファが打鍵を受け付けたとき（`push_str` / `backspace` が `true`）に呼ぶ。
     pub fn keystroke(&mut self, now_ms: u64) {
         self.lanes.spawn(now_ms);
