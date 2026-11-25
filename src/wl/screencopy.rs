@@ -87,6 +87,22 @@ pub(crate) fn is_supported(format: wl_shm::Format) -> bool {
     )
 }
 
+/// コンポジタが `buffer` で伝えた大きさの shm バッファのバイト数。使えない大きさなら `None`。
+///
+/// 幅・高さが 0、stride が 1 行（幅 × 4 バイト）より短い、`stride × height` が i32 を超える
+/// （wl_shm のプールの大きさは i32）なら使えない。値はコンポジタから来るので、掛け算は u64 で行う。
+/// `Some` なら幅・高さ・stride はどれも i32 に収まる。
+pub(crate) fn shm_buffer_len(width: u32, height: u32, stride: u32) -> Option<usize> {
+    if width == 0 || height == 0 || u64::from(stride) < u64::from(width) * 4 {
+        return None;
+    }
+    let len = u64::from(stride) * u64::from(height);
+    if len > i32::MAX as u64 {
+        return None;
+    }
+    usize::try_from(len).ok()
+}
+
 /// 撮った 1 画素 4 バイトの画像を、論理的な向き（1 行目が画面の上）に直す。
 ///
 /// screencopy の画像は出力の物理的な向きのままなので、transform の逆をかける。
@@ -365,14 +381,13 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for Capture {
                         return;
                     }
                 };
-                if width == 0 || height == 0 || stride < width * 4 {
+                let Some(len) = shm_buffer_len(width, height, stride) else {
                     warn!(
                         "screenshot of {output_name}: bad buffer {width}x{height} stride {stride}"
                     );
                     slot.state = FrameState::Failed;
                     return;
-                }
-                let len = stride as usize * height as usize;
+                };
                 let mut pool = match RawPool::new(len, &state.shm) {
                     Ok(pool) => pool,
                     Err(e) => {
@@ -381,6 +396,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for Capture {
                         return;
                     }
                 };
+                // shm_buffer_len が i32 に収まることを確かめている
                 let buffer = pool.create_buffer(
                     0,
                     width as i32,
@@ -517,6 +533,32 @@ mod tests {
             run(T::_90, true),
             (2, 3, vec![vec![1, 4], vec![2, 5], vec![3, 6]])
         );
+    }
+
+    #[test]
+    fn buffer_len_accepts_normal_sizes() {
+        assert_eq!(shm_buffer_len(3440, 1440, 3440 * 4), Some(3440 * 4 * 1440));
+        // 行の終わりに詰め物があってもよい
+        assert_eq!(shm_buffer_len(3, 2, 16), Some(32));
+        // ちょうど i32::MAX まで
+        assert_eq!(
+            shm_buffer_len(1, 1, i32::MAX as u32),
+            Some(i32::MAX as usize)
+        );
+    }
+
+    #[test]
+    fn buffer_len_rejects_bad_or_huge_sizes() {
+        assert_eq!(shm_buffer_len(0, 10, 40), None);
+        assert_eq!(shm_buffer_len(10, 0, 40), None);
+        assert_eq!(shm_buffer_len(10, 10, 39), None);
+        // width * 4 が u32 で桁あふれする幅（u32 で計算すると stride の確認を通ってしまう）
+        assert_eq!(shm_buffer_len(0x4000_0001, 1, 4), None);
+        assert_eq!(shm_buffer_len(u32::MAX, 1, u32::MAX), None);
+        // stride * height が i32 を超える
+        assert_eq!(shm_buffer_len(32768, 16384, 32768 * 4), None);
+        assert_eq!(shm_buffer_len(16384, 16384, 16384 * 4), Some(1 << 30));
+        assert_eq!(shm_buffer_len(1, 2, i32::MAX as u32), None);
     }
 
     #[test]
