@@ -85,6 +85,22 @@ fn clamp_unlock_timing(appearance: &mut Appearance) {
     }
 }
 
+/// `appearance.fade_in_ms` の上限。
+///
+/// 長すぎると、フェードの間ずっと全出力を毎フレーム描き続ける（ロック中 GPU を使い続ける）ので丸める。
+pub const MAX_FADE_IN_MS: u32 = 10_000;
+
+/// 黒からのフェードの長さを上限で丸める。
+fn clamp_fade_in(appearance: &mut Appearance) {
+    if appearance.fade_in_ms > MAX_FADE_IN_MS {
+        log::warn!(
+            "appearance.fade_in_ms {} is too large; using {MAX_FADE_IN_MS}",
+            appearance.fade_in_ms
+        );
+        appearance.fade_in_ms = MAX_FADE_IN_MS;
+    }
+}
+
 /// `appearance.font` の初期値。バイナリに埋め込んだフォントと同じファミリー。
 pub const DEFAULT_FONT: &str = "Inter";
 
@@ -237,6 +253,7 @@ pub fn parse(text: &str) -> Result<Loaded, ConfigError> {
             .map_err(|e| ConfigError(e.to_string()))?;
     sanitize_date_format(&mut config.appearance);
     clamp_unlock_timing(&mut config.appearance);
+    clamp_fade_in(&mut config.appearance);
     clamp_input(&mut config.input);
     Ok(Loaded {
         config,
@@ -488,6 +505,25 @@ mod tests {
         let text = "[appearance]\nunlock_open_ms = 5000\nunlock_reveal_ms = 5000";
         let a = parse(text).unwrap().config.appearance;
         assert_eq!((a.unlock_open_ms, a.unlock_reveal_ms), (5000, 5000));
+    }
+
+    #[test]
+    fn huge_fade_in_is_clamped() {
+        let text = "[appearance]\nfade_in_ms = 4294967295";
+        let a = parse(text).unwrap().config.appearance;
+        assert_eq!(a.fade_in_ms, MAX_FADE_IN_MS);
+        assert_eq!(MAX_FADE_IN_MS, 10_000);
+        // 上限ちょうどと 0 はそのまま
+        let a = parse("[appearance]\nfade_in_ms = 10000")
+            .unwrap()
+            .config
+            .appearance;
+        assert_eq!(a.fade_in_ms, 10_000);
+        let a = parse("[appearance]\nfade_in_ms = 0")
+            .unwrap()
+            .config
+            .appearance;
+        assert_eq!(a.fade_in_ms, 0);
     }
 
     #[test]
