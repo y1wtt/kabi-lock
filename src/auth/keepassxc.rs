@@ -1,7 +1,8 @@
 //! KeePassXC と Secret Service の連携。
 //!
 //! - ロック前: KeePassXC に全 DB のロックを頼み（返事は待たない）、別スレッドで Secret Service の
-//!   各コレクションの `Locked` を最大 2 秒確かめる。ロックされないものが残れば通知を出す。
+//!   各コレクションの `Locked` を最大 2 秒確かめる。ロックされないものが残るか、読めずに確かめられ
+//!   なければ通知を出す。
 //! - 解除後: Secret Service でロック中のコレクションがあれば `Unlock` を呼び、返ったプロンプトの
 //!   `Prompt` を呼ぶ（KeePassXC の解除ダイアログが出る）。プロンプトの完了は待たない。
 //!
@@ -114,22 +115,36 @@ fn locked_paths(collections: &[Collection]) -> Vec<String> {
         .collect()
 }
 
+/// ロック後の確認の結果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LockCheck {
+    /// 全コレクションがロックされた（コレクションがないときも）。
+    AllLocked,
+    /// 時間切れの時点でまだロックされていないコレクションのパス。
+    StillUnlocked(Vec<String>),
+    /// コレクションを読めず、ロックされたか分からない。
+    Unknown,
+}
+
 /// 全コレクションがロックされるまで、`CHECK_INTERVAL` ごとに `CHECK_TIMEOUT` まで確かめる。
 ///
-/// 戻り値は、時間切れの時点でまだロックされていないコレクション（全部ロックされたら空）。
-/// `read` が `None` を返したら（読めなかったら）確認をやめて空を返す（通知は出さない）。
+/// `read` が `None` を返したら（読めなかったら）確認をやめて `Unknown` を返す。
+/// `lockAllDatabases` を送った後なので、読めないことを「全部ロックされた」とはみなさない。
 fn wait_until_locked(
     mut read: impl FnMut() -> Option<Vec<Collection>>,
     mut sleep: impl FnMut(Duration),
-) -> Vec<String> {
+) -> LockCheck {
     let mut retries = 0;
     loop {
         let Some(collections) = read() else {
-            return Vec::new();
+            return LockCheck::Unknown;
         };
         let open = still_unlocked(&collections);
-        if open.is_empty() || retries >= CHECK_RETRIES {
-            return open;
+        if open.is_empty() {
+            return LockCheck::AllLocked;
+        }
+        if retries >= CHECK_RETRIES {
+            return LockCheck::StillUnlocked(open);
         }
         sleep(CHECK_INTERVAL);
         retries += 1;
@@ -158,6 +173,10 @@ fn notification_text(unlocked: &[String]) -> String {
         names.join(", ")
     )
 }
+
+/// ロックされたか確かめられなかったことを知らせる通知の本文。
+const UNKNOWN_NOTIFICATION: &str = "Could not confirm that KeePassXC locked its databases. \
+     Check KeePassXC before leaving the computer.";
 
 /// `Notify` に渡す引数を組み立てる。
 fn notify_args(body: &str) -> NotifyArgs<'_> {
@@ -280,7 +299,7 @@ fn notify(conn: &Connection, body: &str) -> zbus::Result<()> {
 // ---- 公開する入口 -----------------------------------------------------------
 
 /// lockAllDatabases を呼び、別スレッドで最大 2 秒 Secret Service の Locked を確かめる。
-/// ロックされないものが残れば通知を出す。呼び出し側は待たない。
+/// ロックされないものが残るか、読めずに確かめられなければ通知を出す。呼び出し側は待たない。
 pub fn lock_before_in_background() {
     let started = thread::Builder::new()
         .name("kabi-keepassxc".into())
@@ -307,7 +326,7 @@ fn lock_and_watch() -> zbus::Result<()> {
         info!("keepassxc: Secret Service is not provided by KeePassXC; cannot verify the lock");
         return Ok(());
     };
-    let open = wait_until_locked(
+    let check = wait_until_locked(
         || match collections(&conn, &secrets) {
             Ok(c) => Some(c),
             Err(e) => {
@@ -317,15 +336,24 @@ fn lock_and_watch() -> zbus::Result<()> {
         },
         thread::sleep,
     );
-    if open.is_empty() {
-        info!("keepassxc: all exposed databases are locked");
-        return Ok(());
-    }
-    warn!(
-        "keepassxc: {} collection(s) still unlocked after {CHECK_TIMEOUT:?}",
-        open.len()
-    );
-    notify(&conn, &notification_text(&open))?;
+    let body = match check {
+        LockCheck::AllLocked => {
+            info!("keepassxc: all exposed databases are locked");
+            return Ok(());
+        }
+        LockCheck::StillUnlocked(open) => {
+            warn!(
+                "keepassxc: {} collection(s) still unlocked after {CHECK_TIMEOUT:?}",
+                open.len()
+            );
+            notification_text(&open)
+        }
+        LockCheck::Unknown => {
+            warn!("keepassxc: could not confirm that the databases are locked");
+            UNKNOWN_NOTIFICATION.to_owned()
+        }
+    };
+    notify(&conn, &body)?;
     info!("keepassxc: sent a desktop notification");
     Ok(())
 }
@@ -452,14 +480,14 @@ mod tests {
     fn stops_at_once_when_all_locked() {
         let reads = Cell::new(0);
         let mut slept = Duration::ZERO;
-        let open = wait_until_locked(
+        let check = wait_until_locked(
             || {
                 reads.set(reads.get() + 1);
                 Some(vec![col(A, true)])
             },
             |d| slept += d,
         );
-        assert!(open.is_empty());
+        assert_eq!(check, LockCheck::AllLocked);
         assert_eq!(reads.get(), 1);
         assert_eq!(slept, Duration::ZERO);
     }
@@ -467,8 +495,8 @@ mod tests {
     #[test]
     fn no_collections_means_nothing_to_wait_for() {
         let mut slept = Duration::ZERO;
-        let open = wait_until_locked(|| Some(Vec::new()), |d| slept += d);
-        assert!(open.is_empty());
+        let check = wait_until_locked(|| Some(Vec::new()), |d| slept += d);
+        assert_eq!(check, LockCheck::AllLocked);
         assert_eq!(slept, Duration::ZERO);
     }
 
@@ -476,14 +504,14 @@ mod tests {
     fn waits_until_the_lock_takes_effect() {
         let reads = Cell::new(0);
         let mut slept = Duration::ZERO;
-        let open = wait_until_locked(
+        let check = wait_until_locked(
             || {
                 reads.set(reads.get() + 1);
                 Some(vec![col(A, reads.get() >= 4)])
             },
             |d| slept += d,
         );
-        assert!(open.is_empty());
+        assert_eq!(check, LockCheck::AllLocked);
         assert_eq!(reads.get(), 4);
         assert_eq!(slept, CHECK_INTERVAL * 3);
     }
@@ -491,15 +519,16 @@ mod tests {
     #[test]
     fn gives_up_after_the_timeout() {
         let mut slept = Duration::ZERO;
-        let open = wait_until_locked(|| Some(vec![col(A, true), col(B, false)]), |d| slept += d);
-        assert_eq!(open, vec![B.to_string()]);
+        let check = wait_until_locked(|| Some(vec![col(A, true), col(B, false)]), |d| slept += d);
+        assert_eq!(check, LockCheck::StillUnlocked(vec![B.to_string()]));
         assert_eq!(slept, CHECK_TIMEOUT);
     }
 
     #[test]
-    fn read_failure_ends_the_check_quietly() {
+    fn read_failure_makes_the_lock_state_unknown() {
+        // 1 回目は解除されたまま、2 回目は読めない: 「全部ロックされた」にしない
         let reads = Cell::new(0);
-        let open = wait_until_locked(
+        let check = wait_until_locked(
             || {
                 reads.set(reads.get() + 1);
                 if reads.get() == 1 {
@@ -510,8 +539,24 @@ mod tests {
             },
             |_| {},
         );
-        assert!(open.is_empty());
+        assert_eq!(check, LockCheck::Unknown);
         assert_eq!(reads.get(), 2);
+        // 最初から読めないときも同じ
+        let mut slept = Duration::ZERO;
+        assert_eq!(
+            wait_until_locked(|| None, |d| slept += d),
+            LockCheck::Unknown
+        );
+        assert_eq!(slept, Duration::ZERO);
+    }
+
+    #[test]
+    fn unknown_lock_state_notification_says_so() {
+        assert!(
+            UNKNOWN_NOTIFICATION
+                .starts_with("Could not confirm that KeePassXC locked its databases"),
+            "{UNKNOWN_NOTIFICATION}"
+        );
     }
 
     #[test]
