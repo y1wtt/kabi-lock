@@ -13,7 +13,7 @@ use egui::epaint::text::VariationCoords;
 use egui::text::LayoutJob;
 use egui::{
     Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, FontTweak,
-    LayerId, Mesh, Painter, RawInput, Rect, Shape, Stroke, TextFormat, pos2, vec2,
+    LayerId, Mesh, Painter, Pos2, RawInput, Rect, Shape, Stroke, TextFormat, Vec2, pos2, vec2,
 };
 use glow::HasContext as _;
 
@@ -498,7 +498,7 @@ fn paint_scene(painter: &Painter, l: &Layout, scene: &Scene) {
         white(DATE_ALPHA * scene.opacity),
     );
     if let Some(lock) = &scene.lock {
-        paint_lock(painter, l, lock, white(scene.opacity));
+        painter.extend(lock_shapes(l, lock, white(scene.opacity), Vec2::ZERO));
     }
 }
 
@@ -581,28 +581,35 @@ fn paint_date(painter: &Painter, l: &Layout, text: &str, color: Color32) {
     painter.add(Shape::galley_with_override_text_color(pos, galley, color));
 }
 
-/// 錠。U 字を太さ一定の線で描き、本体（角丸の塗りつぶし）を描く。
+/// 錠の図形（U 字の丸い端・U 字・本体）。`shift` だけ左上へずらす。
+///
 /// 足は本体の上端で止めてあり（`scene::shackle_polyline`）、半透明でも本体越しに透けない。
-fn paint_lock(painter: &Painter, l: &Layout, lock: &scene::LockDraw, color: Color32) {
+fn lock_shapes(l: &Layout, lock: &scene::LockDraw, color: Color32, shift: Vec2) -> Vec<Shape> {
     let unit = l.icon_unit;
-    let origin = [l.icon_origin[0] + lock.shake_x * l.scale, l.icon_origin[1]];
-    let to_screen = |p: [f32; 2]| pos2(origin[0] + p[0] * unit, origin[1] + p[1] * unit);
+    let origin = lock_origin(l, lock) - shift;
+    let to_screen = |p: [f32; 2]| pos2(origin.x + p[0] * unit, origin.y + p[1] * unit);
 
     let points: Vec<_> = scene::shackle_polyline(&lock.path, SHACKLE_SEGMENTS)
         .into_iter()
         .map(to_screen)
         .collect();
     let stroke = anim::SHACKLE_STROKE * unit;
-    // egui の線は端が平らなので、見える方の端（最初の点）に丸を足す（設計の stroke-linecap: round）
-    painter.add(Shape::circle_filled(points[0], stroke / 2.0, color));
-    painter.add(Shape::line(points, Stroke::new(stroke, color)));
-
     let body = Rect::from_min_max(
         to_screen([anim::BODY_X, anim::BODY_Y]),
         to_screen([anim::BODY_X + anim::BODY_W, anim::BODY_Y + anim::BODY_H]),
     );
     let radius = (anim::BODY_RADIUS * unit).round().clamp(0.0, 255.0) as u8;
-    painter.add(Shape::rect_filled(body, CornerRadius::same(radius), color));
+    vec![
+        // egui の線は端が平らなので、見える方の端（最初の点）に丸を足す（設計の stroke-linecap: round）
+        Shape::circle_filled(points[0], stroke / 2.0, color),
+        Shape::line(points, Stroke::new(stroke, color)),
+        Shape::rect_filled(body, CornerRadius::same(radius), color),
+    ]
+}
+
+/// 錠のアイコン座標の原点（画面のピクセル）。震えの分だけ横にずれる。
+fn lock_origin(l: &Layout, lock: &scene::LockDraw) -> Pos2 {
+    pos2(l.icon_origin[0] + lock.shake_x * l.scale, l.icon_origin[1])
 }
 
 /// 重ね物を描くのに要る状態一式（App が 1 つ持つ）。
