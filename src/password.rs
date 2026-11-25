@@ -25,6 +25,7 @@ impl PasswordBuffer {
     }
 
     /// 文字列を末尾に足す。足すと `MAX_LEN` を超える場合は何もせず `false` を返す。
+    #[must_use]
     pub fn push_str(&mut self, s: &str) -> bool {
         if self.text.len() + s.len() > MAX_LEN {
             return false;
@@ -34,6 +35,7 @@ impl PasswordBuffer {
     }
 
     /// 最後の 1 文字を消す。消せたら `true`。
+    #[must_use]
     pub fn backspace(&mut self) -> bool {
         self.text.pop().is_some()
     }
@@ -85,7 +87,7 @@ mod tests {
     #[test]
     fn backspace_removes_one_char_even_if_multibyte() {
         let mut buf = PasswordBuffer::new();
-        buf.push_str("aあ");
+        assert!(buf.push_str("aあ"));
         assert!(buf.backspace());
         assert_eq!(buf.take().as_str(), "a");
     }
@@ -99,7 +101,7 @@ mod tests {
     #[test]
     fn clear_empties_the_buffer() {
         let mut buf = PasswordBuffer::new();
-        buf.push_str("secret");
+        assert!(buf.push_str("secret"));
         buf.clear();
         assert!(buf.is_empty());
         assert_eq!(buf.take().as_str(), "");
