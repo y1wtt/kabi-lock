@@ -30,7 +30,7 @@ Rust で開発された [sway](https://swaywm.org/) 向けの画面ロッカー�
 
 - `ext-session-lock-v1` に対応した Wayland コンポジター。sway で開発および動作確認を行っています（sway 1.8 以降で対応）。
 - 任意: `wlr-screencopy-unstable-v1`（sway で対応）。スクリーンショット背景の取得に使用します。非対応の場合は黒背景になり（警告ログを出力）、ロック機能自体には影響しません。
-- EGL および OpenGL ES 3 に対応した GPU ドライバー（Mesa など）。利用できない場合は黒画面でロックを行います。
+- EGL および OpenGL ES 3 に対応した GPU ドライバー（Mesa など）。Mesa はハードウェアのドライバーを読み込めないとき、自動でソフトウェアレンダラ（llvmpipe）に切り替えます。EGL 自体が使えない場合は黒画面でロックを行います。GPU ドライバーに問題があって常に llvmpipe を使いたい場合は `display.renderer = "software"` を設定してください。
 - PAM、libxkbcommon、libwayland。
 - `auth` と `account` の両方のエントリを含む `/etc/pam.d/kabi-lock` サービスファイル（Arch Linux パッケージでは自動的にインストールされます。[インストール](#インストール)を参照）。`auth.pam_service` で指定された PAM サービスファイルが `/etc/pam.d` と `/usr/lib/pam.d` のどちらにも存在しない場合、kabi-lock はロックを実行しません。
 - 任意: sway の IPC ソケット（`SWAYSOCK`。sway が子プロセスに自動設定します）。ロック開始時にフォーカスされていたモニターの特定に使用します。取得できない場合は最初のモニターを使用します。

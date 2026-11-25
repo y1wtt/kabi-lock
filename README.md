@@ -37,7 +37,9 @@ YubiKey.
   (1.8 or newer has `ext-session-lock-v1`).
 - Optional: `wlr-screencopy-unstable-v1` (sway has it), for the screenshot background. Without it
   the background is black (a warning is logged); locking is not affected.
-- A GPU driver with EGL and OpenGL ES 3 (for example Mesa). Without it you get the black fallback.
+- A GPU driver with EGL and OpenGL ES 3 (for example Mesa). When Mesa cannot load a hardware driver
+  it switches to its software renderer (llvmpipe) by itself; with no usable EGL at all you get the
+  black fallback. To always use llvmpipe (for a buggy GPU driver), set `display.renderer = "software"`.
 - PAM, libxkbcommon, libwayland.
 - A `/etc/pam.d/kabi-lock` service file with both `auth` and `account` lines (the Arch package
   installs one; see [Install](#install)). kabi-lock refuses to lock if the PAM service named by
