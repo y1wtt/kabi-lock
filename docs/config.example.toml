@@ -26,6 +26,12 @@
 # Example: primary = ["DP-10", "LG Electronics LG ULTRAWIDE 311NTDV3Z418"]
 primary = []
 
+# "auto": let EGL pick the GPU. Mesa switches to its software renderer
+# (llvmpipe) by itself when it cannot load a hardware driver.
+# "software": always draw with llvmpipe, for a GPU driver that misbehaves.
+# Needs Mesa. Uses more CPU while the lock screen animates.
+renderer = "auto"
+
 [appearance]
 # Time to fade from black to the blurred screenshot, in milliseconds.
 # The clock and the other overlays fade in together.
