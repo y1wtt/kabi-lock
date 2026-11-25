@@ -262,6 +262,16 @@ fn prepare_background(conn: &Connection, blur: f32) -> (Option<Gpu>, Option<Back
     }
 }
 
+/// 論理サイズ × buffer_scale のバッファの画素数。
+///
+/// 大きさはコンポジタから来る。wl_egl_window や GL には i32 で渡すので、掛け算が桁あふれするか
+/// i32 に収まらなければ `None`（呼び出し側は shm の黒にする）。
+fn buffer_size((width, height): (u32, u32), scale: i32) -> Option<(u32, u32)> {
+    let scale = u32::try_from(scale.max(1)).ok()?;
+    let scaled = |v: u32| v.checked_mul(scale).filter(|v| i32::try_from(*v).is_ok());
+    Some((scaled(width)?, scaled(height)?))
+}
+
 /// 論理サイズ全体を不透明領域にする（次の commit で反映される）。
 ///
 /// GPU の EGL サーフェスは ARGB なので、伝えないとコンポジタが毎フレーム下と混ぜ合わせる。
@@ -272,7 +282,9 @@ fn set_opaque_region(
 ) {
     match Region::new(compositor) {
         Ok(region) => {
-            region.add(0, 0, width as i32, height as i32);
+            // i32 に収まらない大きさは i32::MAX にする（不透明領域はサーフェスの外が切り捨てられる）
+            let clamp = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+            region.add(0, 0, clamp(width), clamp(height));
             surface.set_opaque_region(Some(region.wl_region()));
             // region は set_opaque_region の後に捨ててよい（ここで destroy される）
         }
@@ -495,7 +507,16 @@ impl App {
                     return;
                 };
                 let scale = out.scale.max(1);
-                let (buffer_width, buffer_height) = (width * scale as u32, height * scale as u32);
+                let Some((buffer_width, buffer_height)) = buffer_size((width, height), scale)
+                else {
+                    // 桁あふれさせずに shm の黒にする（GPU では描けない大きさ）
+                    log::warn!(
+                        "GPU buffer for {} would be too large ({width}x{height} at scale {scale}), using shm",
+                        out.meta.label()
+                    );
+                    out.switch_to_shm(&self.shm, &self.qh);
+                    return;
+                };
                 let overlay = &mut self.overlay;
                 let machine = &self.machine;
                 let qh = &self.qh;
@@ -624,8 +645,16 @@ impl App {
         if out.render.is_some() {
             return;
         }
-        let scale = out.scale.max(1) as u32;
-        let (width, height) = (out.size.0 * scale, out.size.1 * scale);
+        let Some((width, height)) = buffer_size(out.size, out.scale) else {
+            log::warn!(
+                "GPU surface for {} would be too large ({}x{} at scale {}), using shm",
+                out.meta.label(),
+                out.size.0,
+                out.size.1,
+                out.scale
+            );
+            return;
+        };
         match GpuSurface::new(gpu, out.lock_surface.wl_surface(), width, height) {
             Ok(surface) => {
                 log::debug!("GPU surface for {}: {width}x{height}", out.meta.label());
@@ -1181,6 +1210,30 @@ mod tests {
             None::<()>
         );
         assert_eq!(drawn, 1);
+    }
+
+    #[test]
+    fn buffer_size_multiplies_by_the_scale() {
+        assert_eq!(buffer_size((1920, 1080), 1), Some((1920, 1080)));
+        assert_eq!(buffer_size((1920, 1080), 2), Some((3840, 2160)));
+        // スケール 0 以下は 1 とみなす
+        assert_eq!(buffer_size((1920, 1080), 0), Some((1920, 1080)));
+        assert_eq!(buffer_size((1920, 1080), -3), Some((1920, 1080)));
+        assert_eq!(
+            buffer_size((i32::MAX as u32, 1), 1),
+            Some((i32::MAX as u32, 1))
+        );
+    }
+
+    #[test]
+    fn buffer_size_rejects_overflow() {
+        // u32 で桁あふれする
+        assert_eq!(buffer_size((u32::MAX, 1080), 2), None);
+        assert_eq!(buffer_size((1920, 0x8000_0000), 2), None);
+        assert_eq!(buffer_size((1920, 1080), i32::MAX), None);
+        // u32 には収まるが i32 には収まらない
+        assert_eq!(buffer_size((0x8000_0000, 1080), 1), None);
+        assert_eq!(buffer_size((0x4000_0000, 1080), 2), None);
     }
 
     #[test]
