@@ -74,6 +74,14 @@ fn main() -> ExitCode {
             env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
                 .init();
             let config = kabi_lock::config::load();
+            if config.display.renderer == kabi_lock::config::Renderer::Software {
+                // Mesa は eglInitialize のときにだけこれを読む。一度 GPU で初期化した後では
+                // 切り替えられないので、EGL を作る前（app::run の前）に設定する。
+                // SAFETY: ここまでスレッドを立てていない（env_logger と設定の読み込みだけ）ので、
+                // 環境変数を同時に読み書きするスレッドはない。
+                unsafe { std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1") };
+                log::info!("display.renderer = \"software\": using Mesa's software renderer");
+            }
             // 解除後に KeePassXC の解除を頼むか（Plan 5）。config は run に move されるので先に読む
             let unlock_keepassxc = config.keepassxc.unlock_after;
             let result = app::run(config);
