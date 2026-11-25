@@ -41,8 +41,9 @@ pub struct Screenshot {
 /// 別スレッドで新しい Wayland 接続を開き、全出力を撮る。出力ごとに失敗しうる。
 ///
 /// 失敗した出力は結果に入らない（呼び出し側はその出力の背景を黒にする）。
-pub fn spawn_capture_all() -> JoinHandle<Vec<Screenshot>> {
-    std::thread::Builder::new()
+/// スレッドを起動できなければ警告して `None`（スクリーンショットなしで、全出力の背景が黒）。
+pub fn spawn_capture_all() -> Option<JoinHandle<Vec<Screenshot>>> {
+    let spawned = std::thread::Builder::new()
         .name("kabi-capture".into())
         .spawn(|| {
             let started = Instant::now();
@@ -60,8 +61,14 @@ pub fn spawn_capture_all() -> JoinHandle<Vec<Screenshot>> {
                     Vec::new()
                 }
             }
-        })
-        .expect("failed to spawn the screenshot thread")
+        });
+    match spawned {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            warn!("cannot start the screenshot thread, background will be black: {e}");
+            None
+        }
+    }
 }
 
 /// 32 ビット / 画素で、背景の描画側（`render::background`）が扱える形式か。
@@ -525,7 +532,7 @@ mod tests {
     #[test]
     #[ignore = "needs a running wlroots compositor"]
     fn captures_the_current_session() {
-        let shots = spawn_capture_all().join().expect("thread");
+        let shots = spawn_capture_all().expect("spawn").join().expect("thread");
         assert!(!shots.is_empty());
         for s in &shots {
             assert!(!s.output_name.is_empty());

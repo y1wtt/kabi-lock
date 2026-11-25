@@ -232,9 +232,12 @@ fn prepare_background(conn: &Connection, blur: f32) -> (Option<Gpu>, Option<Back
             None
         }
     };
-    let shots = capture.join().unwrap_or_else(|_| {
-        log::warn!("screenshot thread panicked, background will be black");
-        Vec::new()
+    // 撮影のスレッドを起動できなかったときは、スクリーンショットなし（全出力の背景が黒）
+    let shots = capture.map_or_else(Vec::new, |capture| {
+        capture.join().unwrap_or_else(|_| {
+            log::warn!("screenshot thread panicked, background will be black");
+            Vec::new()
+        })
     });
     let Some(gpu) = gpu else {
         return (None, None);
