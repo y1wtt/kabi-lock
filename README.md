@@ -144,6 +144,7 @@ named by `auth.pam_service` does not exist, kabi-lock refuses to lock (exit code
 | Key | Default | Meaning |
 |---|---|---|
 | `display.primary` | `[]` | Monitors that get the clock, date, input bar and padlock, tried in order (see below) |
+| `display.renderer` | `"auto"` | `"software"` draws with Mesa's software renderer (llvmpipe) instead of the GPU |
 | `appearance.fade_in_ms` | `1500` | Fade from black to the blurred background, in ms |
 | `appearance.blur` | `7` | Blur strength: radius of a 5-pass box blur in screenshot pixels (clamped to 0.5-50; negative or NaN becomes 7) |
 | `appearance.date_format` | `"%m/%d"` | Date under the clock, chrono strftime format; names follow `LC_ALL`, then `LC_TIME`, then `LANG`. An invalid format falls back to the default |

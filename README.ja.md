@@ -116,6 +116,7 @@ swayidle timeout 300 'pgrep -x kabi-lock || kabi-lock'
 | キー | デフォルト値 | 説明 |
 |---|---|---|
 | `display.primary` | `[]` | 時計・日付・入力インジケーター・鍵アイコンを表示するモニター。リストの先頭から順に一致するものを探します（詳細は後述） |
+| `display.renderer` | `"auto"` | `"software"` にすると、GPU ではなく Mesa のソフトウェアレンダラ（llvmpipe）で描画します |
 | `appearance.fade_in_ms` | `1500` | 黒画面からぼかし背景へフェードインする時間（ミリ秒） |
 | `appearance.blur` | `7` | ぼかしの強さ。スクリーンショットのピクセル単位での 5 パス・ボックスブラー半径（`0.5`〜`50` の範囲にクランプされます。負の値や NaN の場合は `7`） |
 | `appearance.date_format` | `"%m/%d"` | 時計の下に表示する日付のフォーマット（chrono の `strftime` 形式）。ロケール名は `LC_ALL`、`LC_TIME`、`LANG` の順で参照します。不正な書式の場合はデフォルト値にフォールバックします |
