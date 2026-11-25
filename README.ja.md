@@ -191,7 +191,7 @@ sudo cp /usr/share/kabi-lock/pam.d/kabi-lock-u2f /etc/pam.d/kabi-lock-u2f
 
 ### KeePassXC
 
-- 画面ロック前、kabi-lock は D-Bus 経由で KeePassXC の `lockAllDatabases` を呼び出します（完了は待機しません）。その後、最大 2 秒間 Secret Service を確かめ、まだ解除されたままのコレクションがあればデスクトップ通知を出します。どちらの場合もロックは進みます。KeePassXC が起動していなければ何もしません。
+- 画面ロック前、kabi-lock は D-Bus 経由で KeePassXC の `lockAllDatabases` を呼び出します（完了は待機しません）。その後、最大 2 秒間 Secret Service を確かめ、まだ解除されたままのコレクションがあるか、コレクションを読み取れずロックを確認できなければデスクトップ通知を出します。どちらの場合もロックは進みます。KeePassXC が起動していなければ何もしません。
 - 画面ロック解除後、ロックされているコレクションの解除を Secret Service 経由で要求し、KeePassXC にロック解除ダイアログを表示させます。
 
 `keepassxc.lock_before = false` と `keepassxc.unlock_after = false` を設定すると無効化できます。
