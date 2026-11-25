@@ -576,7 +576,8 @@ fn paint_date(painter: &Painter, l: &Layout, text: &str, color: Color32) {
     painter.add(Shape::galley_with_override_text_color(pos, galley, color));
 }
 
-/// 錠。U 字を太さ一定の線で描き、その上に本体（角丸の塗りつぶし）を重ねて足の下端を隠す。
+/// 錠。U 字を太さ一定の線で描き、本体（角丸の塗りつぶし）を描く。
+/// 足は本体の上端で止めてあり（`scene::shackle_polyline`）、半透明でも本体越しに透けない。
 fn paint_lock(painter: &Painter, l: &Layout, lock: &scene::LockDraw, color: Color32) {
     let unit = l.icon_unit;
     let origin = [l.icon_origin[0] + lock.shake_x * l.scale, l.icon_origin[1]];
